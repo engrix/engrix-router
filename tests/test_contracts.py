@@ -11,6 +11,7 @@ Dites di sini (bukan cuma di scripts/verify_slice.py, yang jalurnya end-to-end):
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from engrix_router.subscribers import pricing, usage
@@ -65,6 +66,22 @@ def test_kuota_harian_jadi_503_bukan_403():
     assert c.client_status == 503          # 403 = engrix bench key 86400s (key_pool.py:78-85)
     assert c.reset_at is not None and c.reset_at.tzinfo == timezone.utc
     assert c.retry_after_s and c.retry_after_s > 0
+
+
+def test_qoder_queue_throttle_inner_code_wins_over_status_echo():
+    """Insiden 2026-10-09 21:58: vendor bungkus 10605 dalam 403 bertingkat --
+    `"code":"403"` di luar nyaris menenggelamkan kode yang punya policy sendiri,
+    jadi terklasifikasi credential_dead (bench 120 s) padahal vendor cuma bilang
+    "antrian model gratis, coba lagi 30 dtk"."""
+    inner = json.dumps({"isQueued": True, "modelKey": "qfmodel",
+                        "retryAfterSeconds": 30, "serviceAvailable": True})
+    mid = json.dumps({"code": "10605", "message": inner})
+    body = json.dumps({"body": json.dumps({"code": "403", "message": mid})})
+    c = errors.classify(status=403, text=body)
+    assert c.error_class == errors.CLASS_QUEUE_THROTTLED
+    assert c.vendor_code == "10605"
+    assert c.retry_after_s == 30          # retryAfterSeconds vendor, bukan default 8
+    assert c.client_status == 429         # 429 + Retry-After, BUKAN credential_dead
 
 
 def test_token_mati_jadi_503_bukan_401():

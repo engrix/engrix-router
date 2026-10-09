@@ -156,6 +156,7 @@ class Classified:
 
 # ── deteksi vendor code (string mentah dari upstream) ────────────────────────
 _CODE_RE = re.compile(r'"code"\s*:\s*"?(\d+)"?')
+_RETRY_AFTER_RE = re.compile(r'"retryAfterSeconds"\s*:\s*(\d+)')
 _PRICING_URL_RE = re.compile(r"pricingurl", re.I)
 _RATE_TEXT_RE = re.compile(
     r"rate limit|too many requests|quota exceeded|capacity|overloaded|throttl", re.I
@@ -171,11 +172,29 @@ def _next_utc_midnight(now: datetime | None = None) -> datetime:
     return (base + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+_SPECIAL_CODES = {"103", "110", "112", "10605"}
+
+
 def classify_vendor_code(raw: str | None) -> str | None:
+    """Innermost vendor code wins.
+
+    Qoder wraps errors in layers: `{"code":"403","message":"{\"code\":\"10605\"...}"}` --
+    a plain `search()` catches the outer status echo first and the vendor code with
+    its own policy is lost. So: if any code found in the body has a special policy
+    here, it wins; otherwise the first match.
+    """
     if not raw:
         return None
-    match = _CODE_RE.search(raw)
-    return match.group(1) if match else None
+    # Vendor ngirim JSON dalam JSON: kutipan di-escape (`\"code\"`), backslash
+    # bikin pola `"code":` gak pernah match. Buang backslash dulu -- ini cuma
+    # buat deteksi kode, isi pesan tetap utuh.
+    matches = _CODE_RE.findall(raw.replace("\\", ""))
+    if not matches:
+        return None
+    for code in matches:
+        if code in _SPECIAL_CODES:
+            return code
+    return matches[0]
 
 
 def classify(
@@ -228,7 +247,9 @@ def classify(
         return make(CLASS_PRICING_BLOCKED, body or "this model requires a paid plan", retry_after_s=3600)
     # 4) antrean (kode 10605).
     if code == "10605":
-        return make(CLASS_QUEUE_THROTTLED, body or "upstream queue throttle", retry_after_s=8)
+        wait = _RETRY_AFTER_RE.search(body.replace("\\", ""))
+        return make(CLASS_QUEUE_THROTTLED, body or "upstream queue throttle",
+                    retry_after_s=max(8, int(wait.group(1))) if wait else 8)
     # 5) rate limit generik.
     if status == 429 or _RATE_TEXT_RE.search(lowered):
         return make(CLASS_RATE_LIMIT, body or "rate limited")

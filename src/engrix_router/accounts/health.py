@@ -145,7 +145,10 @@ def _lock_ms_for(classified: errors.Classified, *, now_ts: int) -> tuple[str, in
         ttl = get_int("health.cooldown_auth_ms")
         scope = "account"
     elif policy.lock == "short":
-        ttl = get_int("health.cooldown_short_ms")
+        # Vendor kadang ngirim sendiri berapa lama harus nunggu (10605 ->
+        # retryAfterSeconds). Dengarin dia kalau lebih lama dari default.
+        ttl = max(get_int("health.cooldown_short_ms"),
+                  int((classified.retry_after_s or 0) * 1000))
     elif policy.lock == "transient":
         ttl = get_int("health.cooldown_transient_ms")
     elif policy.lock == "backoff":
