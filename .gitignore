@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Secrets -- NEVER COMMIT (admin token, client keys, proxy userinfo)
+.env
+.env.*
+!.env.example
+credentials/
+
+# Runtime: database, logs, verification artifacts
+data/
+
+# Private workbench -- RE notes, wire experiments, vendor data. Never public.
+knowledge/
+
+# Build
+build/
+dist/
+*.spec

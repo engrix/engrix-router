@@ -1,0 +1,65 @@
+# Continuous integration for the public core. No secrets, no deployment: this workflow
+# only proves the tree installs, tests, and passes its own guards on a clean checkout.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: pytest + verify_slice (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install (editable, with dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      # Everything below is offline: the suite stubs httpx and verify_slice.py stubs the
+      # provider send methods, so CI never reaches a vendor and never spends credits.
+      - name: Test suite
+        run: python -m pytest -q
+
+      - name: Vertical slice (39 checks)
+        run: python scripts/verify_slice.py
+
+      # An editable install hides packaging mistakes: a layer folder without __init__.py
+      # still imports fine straight out of src/. This installs the built distribution into
+      # a clean target and imports EVERY layer from there, so a module that would not ship
+      # to a real user fails the build instead of surfacing on someone's server.
+      - name: Installed-copy smoke (catches layers that do not ship)
+        run: |
+          python -m pip install --no-cache-dir --target installed .
+          PYTHONPATH=installed python - <<'PY'
+          import importlib, pathlib, sys
+          src = pathlib.Path("src/engrix_router")
+          modules = sorted({
+              "engrix_router." + ".".join(p.relative_to(src).with_suffix("").parts)
+              for p in src.rglob("*.py") if "__pycache__" not in str(p)
+          })
+          loaded = [m for m in modules if importlib.import_module(m) and m]
+          if not sys.path[0].endswith("installed"):
+              print("warning: cwd precedence", sys.path[:2])
+          print(f"imported {len(loaded)} modules from the installed copy")
+          PY
+
+      # ruff is the intended linter but the tree is not clean under it yet, so it reports
+      # without gating. Remove continue-on-error once `python -m ruff check` is green and
+      # the manual-stage hook in .pre-commit-config.yaml can become a normal one.
+      - name: Lint (advisory only)
+        continue-on-error: true
+        run: python -m ruff check src tests scripts

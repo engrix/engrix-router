@@ -1,0 +1,113 @@
+# =============================================================================
+# engrix-router -- EXAMPLE runtime configuration file
+#
+# READ THIS FIRST: nothing in the codebase loads this file yet.
+# `engrix-router` reads exactly two places today:
+#
+#   1. environment variables  -> core/config.py
+#      anything that needs a restart: paths, bind, secrets, size limits,
+#      process-level HTTP deadlines. Documented in .env.example.
+#   2. the `settings` table   -> storage/settings.py
+#      anything an operator changes without a restart: routing strategy,
+#      cooldowns, budgets, observability retention. Written by the dashboard
+#      or `PATCH /api/settings`, validated against the DEFAULTS registry.
+#
+# A value lives in ONE of those two, never both (that split is deliberate --
+# see the module docstring of core/config.py).
+#
+# This file exists as the future single place for a declarative config: one
+# file, versioned with the deployment, that would seed both of the above on
+# first boot. Until a loader exists, it is documentation with YAML syntax.
+# Do not expect editing it to change anything.
+# =============================================================================
+
+# Every key below is a real key of the DEFAULTS registry in
+# storage/settings.py, with the default value it ships with. The prose after
+# each `#` is that entry's own documentation string. Keys are dotted by domain
+# so `grep` finds the owner of a setting and two subsystems cannot fight over
+# one name.
+settings:
+
+  # ── routing strategy ──
+  routing:
+    strategy: fill-first                       # fill-first | round-robin | least-recent
+    sticky_round_robin_limit: 3                # consecutive requests stuck to one account
+    per_provider: {}                           # {'<provider-id>': {'strategy': 'round-robin', 'sticky_round_robin_limit': 1}}
+    max_connections_per_request: 100           # how many candidates one request may iterate
+
+  # ── connection health ──
+  health:
+    cooldown_auth_ms: 120000                   # 401/402/403/404 -> how long to lock
+    cooldown_transient_ms: 30000               # unclassified error: how long to lock
+    cooldown_short_ms: 5000                    # request-not-allowed style
+    backoff_base_ms: 2000                      # rate limit: 2^level * base
+    backoff_max_ms: 300000                     # cap of the rate-limit backoff
+    backoff_max_level: 15                      # cap of the backoff level
+    lock_plain_4xx: false                      # may 400/406 lock an account? default NO (anti self-DoS)
+    protocol_drift_threshold: 2                # sig_invalid/replay hits before every upstream is frozen
+    # Status, not configuration. Persisted so a drift trip survives a restart.
+    drift_until_ms: 0                          # epoch-ms until which the gateway refuses every upstream call
+    drift_reason: ""                           # why the trip happened, shown in the dashboard
+
+  # ── error contract towards the client ──
+  client:
+    retry_after_default_s: 15                  # Retry-After for 429/503 when the vendor gives no hint
+
+  # ── caches ──
+  catalog:
+    ttl_s: 3600                                # cache GET /models per connection
+  quota:
+    ttl_s: 30                                  # reuse a quota snapshot this long before calling again
+
+  # ── daily budget (UTC day; 0 = unlimited) ──
+  budget:
+    global_tokens_per_day: 0
+    global_requests_per_day: 0
+    per_provider_tokens_per_day: {}            # {'<provider-id>': 4000000}
+    per_key_tokens_per_day: {}                 # {'<api_key_id>': 1000000}
+    reserve_headroom_tokens: 8192              # completion headroom held while a call is reserved
+
+  # ── pricing ──
+  pricing:
+    overrides: {}                              # {'<provider-id>': {'<model>': {'input': 0.15, 'output': 0.6, 'cached': 0.075}}}
+
+  # ── observability ──
+  observability:
+    enabled: true                              # record request_stages (the per-request trace)
+    max_records: 5000                          # ring cap of the requests table
+    max_stage_bytes: 65536                     # truncate payloads larger than this
+    retention_days: 90                         # delete requests older than this
+
+  # ── provider / node guards ──
+  nodes:
+    allow_private_urls: false                  # SSRF guard: false rejects loopback/link-local/RFC1918/metadata addresses
+    validate_before_create: true               # call upstream /models before saving a node
+
+  # Vendor-specific knobs are deliberately NOT listed here. A provider whose
+  # protocol is not public ships as its own distribution and registers its
+  # defaults at import time through settings.register_defaults(mapping, owner=...);
+  # those keys are always prefixed with the provider id ('<provider-id>.<knob>')
+  # and appear in this registry only while that adapter is installed. Adding a
+  # vendor never edits this file or storage/settings.py.
+
+# ── provider discovery ───────────────────────────────────────────────────────
+# Documentation only, same as above. Three sources, all scanned, never a
+# hand-edited import list (providers/registry.py):
+#
+#   built-in     modules in src/engrix_router/providers/
+#                -> openai     generic OpenAI-compatible upstream
+#                -> anthropic  Anthropic Messages upstream
+#                -> runtime providers created from the dashboard are rows in
+#                   the `nodes` table and behave like extra providers
+#                   (model is called as <prefix>/<model>)
+#   entry point  distribution group `engrix_router.providers`
+#   filesystem   EROUTER_PROVIDERS_PATH (env, see .env.example)
+#
+# A provider module declares DEFINITIONS (required to be a vendor) and
+# optionally PROVIDER_CLASS. A broken one is isolated: it is excluded from
+# routing and reported per source in /health, and one prefix claimed by two
+# sources is a startup error rather than "first one wins".
+providers:
+  - id: <prefix>                               # model is called as <prefix>/<model>
+    source: builtin | entry-point | providers-path | node
+    base_url: <https://upstream.example/v1>    # nodes only; validated by the SSRF guard

@@ -1,0 +1,4 @@
+# Dependensi tinggal SATU sumber: [project] di pyproject.toml.
+# File ini cuma jalur install buat yang terbiasa `pip install -r`.
+#   python -m venv .venv && .venv/Scripts/pip install -e .[dev]
+-e .[dev]

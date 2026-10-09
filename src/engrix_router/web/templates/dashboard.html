@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<!-- Dashboard engrix-router. Theme: web/static/engrix.css (token brand pack).
+     Layout: sidebar (nav + brand) left, content right; the utility row lives at
+     the sidebar foot. Dark by default (the brand's primary is the dark theme); the light
+     choice lives in localStorage. JS is inline because this is a one-file admin
+     page; if it grows, move it to static/dashboard.js and split components
+     instead of stacking more here.
+     Operator-visible labels are NOT in this file (ADR-0000): they live in
+     web/strings/en.json + id.json, arrive as one JSON blob in #er-strings and are
+     painted by applyI18n() (static markup carries a data-i18n* hook) or by t()/fmt()
+     (markup built by JS). Field names, ids and units stay here -- they are API
+     surface, not labels. -->
+<html lang="{{DEFAULT_LOCALE}}" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engrix Router</title>
+<script>
+  (function () {
+    var saved = null;
+    try { saved = localStorage.getItem("engrixrouter_theme"); } catch (e) {}
+    var theme = (saved === "light" || saved === "dark") ? saved : "dark";
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<link rel="icon" id="favicon" href="/static/assets/engrix-favicon-dark.svg" type="image/svg+xml">
+<!-- Same webfonts as engrix-agent/web (index.html): Inter for UI, JetBrains Mono
+     for code/numbers. Without them Windows falls back to Segoe UI and the
+     dashboard stops looking like the brand. Fallback stacks stay in the CSS. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/engrix.css">
+<script type="application/json" id="er-strings">{{STRINGS_JSON}}</script>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <img class="logo theme-dark" src="/static/assets/engrix-lockup-router-dark-animated.svg" alt="engrix router">
+      <img class="logo theme-light" src="/static/assets/engrix-lockup-router-light-animated.svg" alt="engrix router">
+      <div class="ver mono">{{APP_VERSION}} · <span id="health">…</span></div>
+    </div>
+
+    <nav class="tabs" id="tabs" aria-label="Views">
+      <button class="tab" data-view="overview" aria-selected="true" data-i18n="nav.overview"></button>
+      <button class="tab" data-view="requests" aria-selected="false" data-i18n="nav.requests"></button>
+      <button class="tab" data-view="connections" aria-selected="false" data-i18n="nav.connections"></button>
+      <button class="tab" data-view="nodes" aria-selected="false" data-i18n="nav.nodes"></button>
+      <button class="tab" data-view="keys" aria-selected="false" data-i18n="nav.keys"></button>
+      <button class="tab" data-view="proxy" aria-selected="false" data-i18n="nav.proxy"></button>
+      <button class="tab" data-view="settings" aria-selected="false" data-i18n="nav.settings"></button>
+      <button class="tab" data-view="logs" aria-selected="false" data-i18n="nav.logs"></button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="row tight" id="locale-toggle" role="group" data-i18n-aria="ui.language">
+        <button id="btn-lang-en" class="tight primary" data-i18n-title="ui.english" data-i18n-aria="ui.english">EN</button>
+        <button id="btn-lang-id" class="tight" data-i18n-title="ui.indonesian" data-i18n-aria="ui.indonesian">ID</button>
+      </div>
+      <div class="row tight">
+        <button id="btn-refresh" class="tight" data-i18n="top.refresh"></button>
+        <button id="btn-theme" class="tight" data-i18n="top.theme"></button>
+      </div>
+      <button id="btn-signout" class="tight hidden" data-i18n="top.signout"></button>
+    </div>
+  </aside>
+
+  <main>
+  <div id="gate" class="gate">
+    <img class="gate-logo theme-dark" src="/static/assets/engrix-lockup-router-dark-animated.svg" alt="engrix router">
+    <img class="gate-logo theme-light" src="/static/assets/engrix-lockup-router-light-animated.svg" alt="engrix router">
+    <img class="mascot theme-dark" src="/static/assets/engrix-mascot-standby-dark.svg" alt="standby">
+    <img class="mascot theme-light" src="/static/assets/engrix-mascot-standby-light.svg" alt="standby">
+    <h2 data-i18n="gate.title"></h2>
+    <p class="muted tiny" data-i18n-code="gate.hint"><code>EROUTER_ADMIN_TOKEN</code></p>
+    <label>EROUTER_ADMIN_TOKEN</label>
+    <input id="token-input" type="password" data-i18n-placeholder="gate.token_ph">
+    <div class="row" style="margin-top:10px">
+      <button id="token-save" class="primary" data-i18n="gate.sign_in"></button>
+    </div>
+    <p id="gate-error" class="tiny" style="color:var(--danger)"></p>
+  </div>
+
+  <section id="view-overview"><div id="client-hint"></div><div class="grid" id="kpis"></div><div id="tables"></div></section>
+
+  <section id="view-requests" class="hidden">
+    <div class="card"><div class="row">
+      <div><label data-i18n="req.provider_filter"></label><input id="req-provider" data-i18n-placeholder="req.provider_ph"></div>
+      <div><label data-i18n="common.status"></label><input id="req-status" data-i18n-placeholder="req.status_ph"></div>
+      <div class="tight" style="align-self:flex-end"><button id="req-load" data-i18n="req.load"></button></div>
+    </div></div>
+    <div id="req-list"></div>
+    <div id="req-detail"></div>
+  </section>
+
+  <section id="view-connections" class="hidden"><div id="conn-body"></div></section>
+  <section id="view-nodes" class="hidden"><div id="node-body"></div></section>
+  <section id="view-keys" class="hidden"><div id="key-body"></div></section>
+  <section id="view-proxy" class="hidden"><div id="proxy-body"></div></section>
+  <section id="view-settings" class="hidden"><div id="set-body"></div></section>
+  <section id="view-logs" class="hidden"><pre class="code" id="log-out" data-i18n="log.idle"></pre><div class="row tight"><button id="log-follow" data-i18n="log.follow"></button></div></section>
+</main>
+
+<script>
+const TOKEN_KEY = "engrixrouter_admin_token";
+const el = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const num = (n) => (n === null || n === undefined || n === "") ? "—" : Number(n).toLocaleString("id-ID");
+const money = (n) => "$" + Number(n || 0).toFixed(6);
+const clock = (ms) => ms ? new Date(Number(ms)).toLocaleString("id-ID", { hour12: false }) : "—";
+
+// Labels are data, never markup (ADR-0000). Both locale catalogs arrive in one blob,
+// so switching language re-paints the page without a round trip to the server.
+const STRINGS = JSON.parse(document.getElementById("er-strings").textContent);
+const LOCALE_KEY = "engrix.ui.locale";
+let locale = "{{DEFAULT_LOCALE}}";
+try { locale = localStorage.getItem(LOCALE_KEY) || locale; } catch (e) {}
+
+function t(k) { return (STRINGS[locale] || {})[k] ?? (STRINGS.en[k] ?? k); }
+
+// A label that interpolates data keeps one catalog key plus a {name} slot; splitting
+// it into two keys would break word order in the other locale.
+function fmt(k, args) {
+  let out = t(k);
+  for (const name of Object.keys(args || {})) out = out.split("{" + name + "}").join(String(args[name]));
+  return out;
+}
+
+function applyI18n() {
+  document.querySelectorAll("[data-i18n]").forEach(node => node.textContent = t(node.dataset.i18n));
+  document.querySelectorAll("[data-i18n-title]").forEach(node => node.setAttribute("title", t(node.dataset.i18nTitle)));
+  document.querySelectorAll("[data-i18n-placeholder]").forEach(node => node.setAttribute("placeholder", t(node.dataset.i18nPlaceholder)));
+  document.querySelectorAll("[data-i18n-aria]").forEach(node => node.setAttribute("aria-label", t(node.dataset.i18nAria)));
+  // gate.hint keeps its inline <code> slot (an env name is an identifier, not a label),
+  // so the translated sentence is spliced around the element the markup already carries.
+  document.querySelectorAll("[data-i18n-code]").forEach(node => {
+    const slot = node.querySelector("code");
+    const parts = t(node.dataset.i18nCode).split("{value}");
+    node.textContent = "";
+    node.append(parts[0]);
+    if (slot) node.append(slot);
+    node.append(parts.slice(1).join("{value}"));
+  });
+}
+
+function markLocale() {
+  ["en", "id"].forEach(code => {
+    const button = el("btn-lang-" + code);
+    if (!button) return;
+    button.setAttribute("aria-pressed", String(code === locale));
+    button.classList.toggle("primary", code === locale);
+  });
+}
+
+function setLocale(next) {
+  locale = next;
+  try { localStorage.setItem(LOCALE_KEY, next); } catch (e) {}
+  document.documentElement.setAttribute("lang", next);
+  markLocale();
+  applyI18n();
+  loadHealth();  // the status line under the brand is painted at boot; repaint it too
+  // Panels built by JS are label sources too, so re-render the active view the same way
+  // the Refresh button does. Skipped without a token: an anonymous toggle must not push
+  // a 401 into the gate.
+  if (token()) {
+    const active = document.querySelector('.tab[aria-selected="true"]');
+    show(active ? active.dataset.view : "overview");
+  }
+}
+
+function token() { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
+function setToken(v) { try { v ? localStorage.setItem(TOKEN_KEY, v) : localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
+
+// Gate and shell are one decision: no token = no chrome (sidebar stays hidden).
+function applyAuthUI() {
+  document.querySelector(".shell").classList.toggle("locked", !token());
+  el("btn-signout").classList.toggle("hidden", !token());
+}
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({ "authorization": "Bearer " + token(), "content-type": "application/json" }, opts.headers || {});
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  const text = await res.text();
+  let body = null; try { body = JSON.parse(text); } catch (e) { body = { raw: text }; }
+  if (!res.ok) throw Object.assign(new Error((body && body.error && body.error.message) || res.statusText), { status: res.status, body });
+  return body;
+}
+
+function badge(status) {
+  const map = { ok: "ok", active: "ok", unknown: "info", cooling: "warn", unavailable: "err",
+                needs_reauth: "err", rate_limited: "warn", upstream_error: "err", client_error: "warn",
+                budget_exceeded: "warn", aborted: "info", locked: "warn", in_flight: "violet", dry_run: "violet" };
+  return `<span class="badge ${map[status] || "info"}">${esc(status)}</span>`;
+}
+
+function card(title, html) { return `<div class="card"><h3>${esc(title)}</h3>${html}</div>`; }
+
+// Empty states carry the brand mascot (pack rule: mascot lives inside the
+// product); the label text itself always comes from the locale catalog.
+function emptyState(label, colspan) {
+  return `<tr><td colspan="${colspan || 1}"><div class="empty-state">
+    <img class="theme-dark" src="/static/assets/engrix-mascot-default-dark.svg" alt="">
+    <img class="theme-light" src="/static/assets/engrix-mascot-default-light.svg" alt="">
+    <span>${esc(label)}</span></div></td></tr>`;
+}
+
+// Quota is the only number that decides whether this gateway can still be used
+// (vendor code 110 = the day rolls over in UTC). Read from the /api/quota snapshot,
+// which is cached for 30 seconds.
+function quotaCard(quota) {
+  if (quota.error) return card(t("quota.title"), `<p class="tiny" style="color:var(--danger)">${esc(quota.error)}</p>`);
+  const rows = (quota.providers || []).map(p => {
+    if (!p.available) return `<tr><td class="mono tiny">${esc(p.name || p.connection_id)}</td>
+      <td colspan="3" class="tiny muted">${t("quota.no_endpoint")}</td></tr>`;
+    return (p.readings || []).map(r => `<tr><td class="mono tiny">${esc(p.name || (p.connection_id || "").slice(0, 8))}</td>
+      <td class="tiny">${esc(r.scope)}</td>
+      <td class="tiny">${r.unlimited ? t("quota.unlimited") : fmt("quota.remaining", { remaining: num(r.remaining), total: num(r.total) })}</td>
+      <td class="tiny">${r.remaining_pct === null ? "—" : esc(r.remaining_pct) + "%"}
+        ${r.reset_at ? fmt("quota.reset_at", { value: esc(clock(r.reset_at)) }) : ""}</td></tr>`).join("");
+  }).join("");
+  const w = quota.worst;
+  return card(t("quota.title"), `<table><thead><tr><th>${t("common.account")}</th><th>${t("common.scope")}</th><th>${t("quota.col_left")}</th><th>%</th></tr></thead>
+    <tbody>${rows || emptyState(t("quota.empty"), 4)}</tbody></table>
+    ${w ? `<div class="tiny muted" style="margin-top:6px">${fmt("quota.worst", { provider: esc(w.provider), scope: esc(w.scope), remaining: num(w.remaining) })}</div>` : ""}`);
+}
+
+async function loadHealth() {
+  const res = await fetch("/health");
+  const j = await res.json();
+  el("health").textContent = j.ok ? fmt("status.alive", { value: j.uptime_s }) + (j.upstream_frozen ? t("status.frozen") : "") : t("status.problem");
+  el("health").style.color = j.upstream_frozen ? "var(--danger)" : "var(--ok)";
+  if (!token()) { el("gate").classList.remove("hidden"); }
+  return j;
+}
+
+async function loadOverview() {
+  const stats = await api("/api/usage/stats?period=today");
+  const state = await api("/api/state");
+  let quota = { providers: [], worst: null };
+  try { quota = await api("/api/quota"); } catch (e) { quota = { providers: [], error: e.message }; }
+  const totals = stats.totals || {};
+  el("client-hint").innerHTML = card(t("overview.client_title"), `<pre class="code">POST {{CLIENT_BASE}}/v1/chat/completions
+authorization: Bearer &lt;client key -- create one in the API keys tab&gt;
+{"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "ping"}]}</pre>
+    <p class="tiny muted" style="margin:8px 0 0">${t("overview.client_note")}</p>`);
+  el("kpis").innerHTML = [
+    card(t("overview.req_today"), `<div class="kpi">${num(totals.requests)} <small>req</small></div>
+      <div class="tiny muted">${fmt("overview.req_split", { ok: num(totals.ok), errors: num(totals.errors) })}</div>`),
+    card(t("overview.tokens_today"), `<div class="kpi">${num(totals.tokens)} <small>tok</small></div>
+      <div class="tiny muted">${fmt("overview.token_split", { prompt: num(totals.prompt), cached: num(totals.cached) })}</div>`),
+    card(t("overview.cost"), `<div class="kpi">${money(totals.cost)}</div>
+      <div class="tiny muted">${t("overview.cost_note")}</div>`),
+    card(t("overview.providers"), `<div class="kpi">${state.providers.length}</div>
+      <div class="tiny muted">${state.providers.map(p => `<span class="badge violet">${esc(p.id)}</span>`).join(" ")}</div>`),
+    card(t("overview.budget"), `<table><tbody>${
+        (stats.budget.rows || []).map(r => `<tr><td class="mono tiny">${esc(r.scope)}</td>
+          <td class="num">${num(r.used_tokens)} / ${r.token_limit ? num(r.token_limit) : "∞"}</td>
+          <td class="num">${r.used_pct === null ? "—" : r.used_pct + "%"}</td></tr>`).join("") || emptyState(t("overview.budget_empty"), 3)
+      }</tbody></table>`),
+    card(t("overview.health"), `<table><tbody>${
+      state.health.length ? state.health.map(h => `<tr><td class="mono tiny">${esc((h.connection_id || "").slice(0, 8))}</td>
+        <td>${badge(h.test_status)}</td><td class="tiny">${esc(h.error_class || "")}</td>
+        <td class="tiny">${(h.locks || []).map(l => esc(l.model) + "→" + clock(l.locked_until)).join("<br>") || ""}</td></tr>`).join("")
+        : emptyState(t("common.no_connections"), 4)}</tbody></table>`),
+    quotaCard(quota),
+    card(t("overview.drift"), `<div>${badge(state.drift.tripped ? "unavailable" : "active")}</div>
+      <div class="tiny muted">${esc(state.drift.reason || t("overview.no_trip"))}</div>
+      ${state.drift.tripped ? '<div class="row tight"><button id="drift-clear">' + t("overview.unfreeze") + '</button></div>' : ""}`),
+  ].join("");
+  const dc = el("drift-clear");
+  if (dc) dc.onclick = async () => { await api("/api/drift/clear", { method: "POST" }); loadOverview(); loadHealth(); };
+  el("tables").innerHTML = card(t("overview.usage_provider"), `<table><thead><tr><th>${t("common.provider")}</th><th>${t("common.req")}</th><th>${t("common.token")}</th><th>${t("common.cost")}</th><th>${t("common.failed")}</th></tr></thead>
+    <tbody>${(stats.by_provider || []).map(r => `<tr><td class="mono">${esc(r.provider)}</td><td>${num(r.requests)}</td>
+      <td>${num(r.tokens)}</td><td>${money(r.cost)}</td><td>${num(r.errors)}</td></tr>`).join("") || emptyState(t("overview.no_traffic"), 5)}</tbody></table>`)
+    + card(t("overview.usage_model"), `<table><thead><tr><th>${t("common.provider")}</th><th>${t("common.model")}</th><th>${t("common.req")}</th><th>${t("common.token")}</th><th>${t("common.cost")}</th></tr></thead>
+    <tbody>${(stats.by_model || []).map(r => `<tr><td class="mono tiny">${esc(r.provider)}</td><td class="mono tiny">${esc(r.model)}</td>
+      <td>${num(r.requests)}</td><td>${num(r.tokens)}</td><td>${money(r.cost)}</td></tr>`).join("") || emptyState(t("overview.no_traffic"), 6)}</tbody></table>`);
+}
+
+async function loadRequests() {
+  const params = new URLSearchParams({ limit: "50" });
+  if (el("req-provider").value) params.set("provider", el("req-provider").value);
+  if (el("req-status").value) params.set("status", el("req-status").value);
+  const rows = await api("/api/usage/requests?" + params.toString());
+  el("req-list").innerHTML = card(t("req.title"), `<table><thead><tr><th>rid</th><th>${t("common.time")}</th><th>${t("common.provider_model")}</th><th>${t("common.status")}</th>
+    <th>ttft</th><th>${t("common.total")}</th><th>${t("common.token")}</th><th>${t("common.cost")}</th><th>${t("common.error")}</th></tr></thead><tbody>${
+    rows.map(r => `<tr><td><a href="#" data-rid="${esc(r.id)}" class="rid mono tiny">${esc((r.id || "").slice(0, 10))}</a></td>
+      <td class="tiny">${clock(r.ts)}</td><td class="mono tiny">${esc(r.provider)}/${esc(r.model)}</td>
+      <td>${badge(r.status)}${r.http_out ? ` <span class="tiny muted">${esc(r.http_out)}</span>` : ""}</td>
+      <td class="tiny">${num(r.ttft_ms)}ms</td><td class="tiny">${num(r.total_ms)}ms</td>
+      <td class="tiny">${num(r.total)}</td><td class="tiny">${money(r.cost_usd)}</td>
+      <td class="tiny mono">${esc(r.error_class || "")}${r.error_code ? "·" + esc(r.error_code) : ""}</td></tr>`).join("")
+      || emptyState(t("req.empty"), 9)}</tbody></table>`);
+  document.querySelectorAll(".rid").forEach(a => a.onclick = (ev) => { ev.preventDefault(); showTrace(a.dataset.rid); });
+}
+
+async function showTrace(rid) {
+  const item = await api(`/api/usage/requests/${rid}`);
+  const stages = (item.stages || []).map(s => {
+    let body = s.payload_json || "";
+    if (body.length > 4000) body = body.slice(0, 4000) + ` …[${s.truncated ? fmt("trace.truncated", { value: num(s.original_bytes) }) : ""}]`;
+    return `<div class="stage"><div class="who">${esc(s.step)} · ${esc(s.name)} · ${esc(s.direction)} · ${num(s.bytes)}B</div>
+      <pre class="code">${esc(body)}</pre></div>`;
+  }).join("");
+  el("req-detail").innerHTML = card(fmt("trace.title", { value: rid.slice(0, 12) }), `<div class="row tiny muted">
+      <span>${badge(item.status)}</span><span>http_out ${esc(item.http_out)}</span><span>upstream ${esc(item.upstream_status)}</span>
+      <span>ttft ${num(item.ttft_ms)}ms</span><span>total ${num(item.total_ms)}ms</span><span>frames ${num(item.frames)}</span>
+      <span>usage ${esc(item.usage_source)}</span><span class="mono">${esc(item.provider)}/${esc(item.model)}</span></div>
+      ${item.error_text ? `<pre class="code" style="color:var(--danger)">${esc(item.error_text)}</pre>` : ""}
+      ${stages || '<p class="muted tiny">' + t("trace.no_stages") + '</p>'}`);
+}
+
+async function loadConnections() {
+  const providers = await api("/api/providers");
+  const conns = await api("/api/connections");
+  el("conn-body").innerHTML = card(t("conn.providers"), `<table><thead><tr><th>id</th><th>base_url</th><th>${t("conn.col_auth")}</th><th>${t("conn.col_probe")}</th><th>${t("conn.col_quota")}</th><th>${t("conn.col_connections")}</th></tr></thead><tbody>${
+    providers.map(p => `<tr><td class="mono">${esc(p.id)}${p.is_node ? ' <span class="badge violet tiny">' + t("conn.node_badge") + '</span>' : ""}</td>
+      <td class="mono tiny">${esc(p.base_url)}</td><td class="tiny">${esc(p.auth_modes.join(","))}</td>
+      <td class="tiny">${esc(p.probe_tier)}</td><td>${p.has_usage ? badge("active") : badge("unknown")}</td>
+      <td class="tiny">${p.active_connections}/${p.connections}</td></tr>`).join("")}</tbody></table>`)
+    + card(t("conn.connections"), `<table><thead><tr><th>${t("common.name")}</th><th>${t("common.provider_model")}</th><th>${t("conn.col_priority")}</th><th>${t("common.active")}</th><th>${t("conn.col_health")}</th><th>${t("common.token")}</th><th></th></tr></thead><tbody>${
+      conns.map(c => `<tr><td>${esc(c.name || c.email)}</td><td class="mono tiny">${esc(c.provider)}</td>
+        <td class="tiny">${esc(c.priority)}</td><td class="tiny">${c.is_active ? t("common.yes") : t("common.no")}</td>
+        <td>${badge((c.health || {}).test_status || "unknown")} <span class="tiny muted">${esc((c.health || {}).error_class || "")}</span></td>
+        <td class="tiny">${c.expires_at ? esc(c.expires_at) : (c.has_api_key ? t("conn.api_key_label") : "—")}</td>
+        <td class="row tight"><button class="tiny test" data-id="${esc(c.id)}">${t("conn.test")}</button>
+          <button class="tiny cat" data-id="${esc(c.id)}">${t("conn.catalog")}</button>
+          <button class="tiny mdl" data-id="${esc(c.id)}">${t("conn.test_models")}</button></td></tr>`).join("")
+        || emptyState(t("conn.empty"), 7)}</tbody></table>
+      <div id="conn-out"></div>
+      <form id="conn-form" class="grid" style="margin-top:12px">
+        <div><label>provider</label><input name="provider" required placeholder="${esc(t("conn.provider_ph"))}"></div>
+        <div><label>${t("common.name")}</label><input name="name" placeholder="${esc(t("conn.name_ph"))}"></div>
+        <div><label>auth_type</label><input name="auth_type" value="apikey"></div>
+        <div><label>api_key / access_token</label><input name="api_key" type="password"></div>
+        <div class="tight" style="align-self:flex-end"><button class="primary">${t("common.add")}</button></div>
+      </form>`);
+  document.querySelectorAll("button.test").forEach(b => b.onclick = async () => {
+    b.disabled = true; b.textContent = "…";
+    try { const r = await api(`/api/connections/${b.dataset.id}/test`, { method: "POST" });
+      b.textContent = r.ok ? fmt("common.ok_ms", { value: r.latency_ms }) : t("common.failed"); if (!r.ok) b.title = r.error; }
+    catch (e) { b.textContent = t("common.error"); b.title = e.message; }
+    b.disabled = false;
+  });
+  // Catalog = the vendor's own model_config copy for that account (costs 0 credit).
+  // It is force-read (?force=true) on purpose: this tab is exactly where we check
+  // whether the vendor still matches the mirror.
+  document.querySelectorAll("button.cat").forEach(b => b.onclick = async () => {
+    b.disabled = true; b.textContent = "…";
+    try {
+      const r = await api(`/api/connections/${b.dataset.id}/models?force=true`);
+      el("conn-out").innerHTML = card(fmt("conn.catalog_title", { value: b.dataset.id.slice(0, 8) }), r.ok
+        ? `<table><thead><tr><th>${t("common.model")}</th><th>${t("common.name")}</th><th>${t("conn.col_context")}</th><th>${t("conn.col_vision")}</th><th>${t("conn.col_tools")}</th></tr></thead><tbody>${
+            (r.models || []).map(m => `<tr><td class="mono tiny">${esc(m.id)}</td><td class="tiny">${esc(m.name)}</td>
+              <td class="tiny">${num(m.context_length)}</td><td class="tiny">${m.supports_vision ? t("common.yes") : "—"}</td>
+              <td class="tiny">${m.supports_tools ? t("common.yes") : "—"}</td></tr>`).join("")
+            || emptyState(t("common.empty"), 5)}</tbody></table>`
+        : `<p class="tiny" style="color:var(--danger)">${esc(r.error || t("common.failed"))}</p>`);
+      b.textContent = r.ok ? "ok" : t("common.failed");
+    } catch (e) { b.textContent = t("common.error"); b.title = e.message; }
+    b.disabled = false;
+  });
+  document.querySelectorAll("button.mdl").forEach(b => b.onclick = async () => {
+    if (!confirm(t("conn.test_models_confirm"))) return;
+    b.disabled = true; b.textContent = "…";
+    try {
+      const r = await api(`/api/connections/${b.dataset.id}/test_models`,
+        { method: "POST", body: JSON.stringify({ allow_spend: true, max_models: 2 }) });
+      el("conn-out").innerHTML = card(fmt("conn.test_models_title", { value: b.dataset.id.slice(0, 8) }),
+        `<table><thead><tr><th>${t("common.model")}</th><th>ok</th><th>${t("conn.col_latency")}</th><th>${t("common.error")}</th></tr></thead><tbody>${
+          (r.results || []).map(x => `<tr><td class="mono tiny">${esc(x.model)}</td><td>${badge(x.ok ? "ok" : "upstream_error")}</td>
+            <td class="tiny">${num(x.latency_ms)}ms</td><td class="tiny mono">${esc(x.error_class || "")} ${esc(x.error || "")}</td></tr>`).join("")
+          || emptyState(t("common.no_results"), 4)}</tbody></table>`);
+      b.textContent = t("common.done");
+    } catch (e) { b.textContent = t("common.error"); b.title = e.message; }
+    b.disabled = false;
+  });
+  el("conn-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const f = Object.fromEntries(new FormData(ev.target).entries());
+    const payload = { provider: f.provider, name: f.name, auth_type: f.auth_type || "apikey" };
+    if (f.api_key) payload[f.auth_type === "oauth" ? "access_token" : "api_key"] = f.api_key;
+    try { await api("/api/connections", { method: "POST", body: JSON.stringify(payload) }); loadConnections(); }
+    catch (e) { alert(e.message); }
+  };
+}
+
+async function loadNodes() {
+  const nodes = await api("/api/nodes");
+  el("node-body").innerHTML = card(t("nodes.title"), `<table><thead><tr><th>prefix</th><th>${t("common.name")}</th><th>base_url</th><th>type</th><th>${t("common.active")}</th></tr></thead><tbody>${
+    nodes.map(n => `<tr><td class="mono">${esc(n.prefix)}/<span class="muted">model</span></td><td>${esc(n.name)}</td>
+      <td class="mono tiny">${esc(n.base_url)}</td><td class="tiny">${esc(n.type)} · ${esc(n.api_type)}</td>
+      <td class="tiny">${n.is_active ? t("common.yes") : t("common.no")}</td></tr>`).join("") || emptyState(t("nodes.empty"), 5)}</tbody></table>
+    <form id="node-form" class="grid" style="margin-top:12px">
+      <div><label>${t("nodes.f_prefix")}</label><input name="prefix" required placeholder="${esc(t("nodes.prefix_ph"))}"></div>
+      <div><label>${t("common.name")}</label><input name="name" required placeholder="Groq"></div>
+      <div><label>base_url</label><input name="base_url" required placeholder="https://api.groq.com/openai/v1"></div>
+      <div><label>${t("nodes.f_api_key")}</label><input name="api_key" type="password"></div>
+      <div class="tight" style="align-self:flex-end"><button class="primary">${t("nodes.validate_save")}</button></div>
+    </form>`);
+  el("node-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const f = Object.fromEntries(new FormData(ev.target).entries());
+    try {
+      const v = await api("/api/nodes/validate", { method: "POST", body: JSON.stringify({ base_url: f.base_url, api_key: f.api_key, type: "openai-compatible" }) });
+      if (!v.ok) { alert(fmt("nodes.preflight_failed", { value: esc(v.error || v.stage) })); return; }
+      await api("/api/nodes", { method: "POST", body: JSON.stringify({ name: f.name, prefix: f.prefix, base_url: v.base_url, type: "openai-compatible", api_type: "chat" }) });
+      loadNodes();
+    } catch (e) { alert(e.message + (e.body && e.body.detail ? " — " + e.body.detail : "")); }
+  };
+}
+
+async function loadKeys() {
+  const keys = await api("/api/keys");
+  el("key-body").innerHTML = card(t("keys.title"), `<table><thead><tr><th>${t("common.name")}</th><th>prefix</th><th>${t("common.active")}</th><th>${t("keys.col_created")}</th><th>${t("keys.col_last_used")}</th><th></th></tr></thead><tbody>${
+    keys.map(k => `<tr><td>${esc(k.name)}</td><td class="mono tiny">${esc(k.key_prefix)}…</td>
+      <td class="tiny">${k.is_active ? t("common.yes") : t("common.no")}</td><td class="tiny">${esc(k.created_at)}</td>
+      <td class="tiny">${esc(k.last_used_at || "—")}</td>
+      <td class="row tight"><button class="tiny toggle" data-id="${esc(k.id)}" data-to="${k.is_active ? 0 : 1}">${k.is_active ? t("keys.disable") : t("keys.enable")}</button></td></tr>`).join("")
+      || emptyState(t("keys.empty"), 6)}</tbody></table>
+    <form id="key-form" class="row" style="margin-top:12px"><div><label>${t("keys.f_name")}</label><input name="name" required placeholder="engrix-agent"></div>
+      <div class="tight"><button class="primary">${t("common.create")}</button></div></form>
+    <div id="key-out"></div>`);
+  el("key-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const name = new FormData(ev.target).get("name");
+    const created = await api("/api/keys", { method: "POST", body: JSON.stringify({ name }) });
+    el("key-out").innerHTML = card(t("keys.created_title"), `<pre class="code">${esc(created.key)}</pre>
+      <p class="tiny muted">${t("keys.created_note")}</p>`);
+  };
+  document.querySelectorAll("button.toggle").forEach(b => b.onclick = async () => {
+    await api(`/api/keys/${b.dataset.id}`, { method: "PATCH", body: JSON.stringify({ is_active: b.dataset.to === "1" }) });
+    loadKeys();
+  });
+}
+
+async function loadProxy() {
+  const pools = await api("/api/proxy-pools?include_usage=true");
+  el("proxy-body").innerHTML = card(t("proxy.title"), `<table><thead><tr><th>${t("common.name")}</th><th>url</th><th>type</th><th>${t("proxy.col_strict")}</th><th>${t("proxy.col_test")}</th><th>${t("proxy.col_bound")}</th><th></th></tr></thead><tbody>${
+    pools.map(p => `<tr><td>${esc(p.name)}</td><td class="mono tiny">${esc(p.proxy_url)}</td><td class="tiny">${esc(p.type)}</td>
+      <td class="tiny">${p.strict_proxy ? t("common.yes") : t("common.no")}</td><td>${badge(p.test_status || "unknown")} <span class="tiny muted">${esc(p.last_error || "")}</span></td>
+      <td class="tiny">${p.bound_connection_count ?? "—"}</td>
+      <td class="row tight"><button class="tiny t" data-id="${esc(p.id)}">${t("proxy.try")}</button></td></tr>`).join("")
+      || emptyState(t("proxy.empty"), 7)}</tbody></table>
+    <form id="proxy-form" class="grid" style="margin-top:12px">
+      <div><label>${t("common.name")}</label><input name="name" required placeholder="pool A"></div>
+      <div><label>${t("proxy.f_url")}</label><input name="proxy_url" required placeholder="http://172.17.0.1:7897"></div>
+      <div><label>${t("proxy.f_credential_hint")}</label><input name="credential_hint" placeholder="EROUTER_PROXY_A"></div>
+      <div class="tight" style="align-self:flex-end"><button class="primary">${t("common.add")}</button></div></form>`);
+  el("proxy-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const f = Object.fromEntries(new FormData(ev.target).entries());
+    try { await api("/api/proxy-pools", { method: "POST", body: JSON.stringify(f) }); loadProxy(); } catch (e) { alert(e.message); }
+  };
+  document.querySelectorAll("button.t").forEach(b => b.onclick = async () => {
+    b.disabled = true; b.textContent = "…";
+    const r = await api(`/api/proxy-pools/${b.dataset.id}/test`, { method: "POST", body: "{}" });
+    b.textContent = r.ok ? fmt("common.ok_ms", { value: r.latency_ms }) : t("common.failed"); b.disabled = false; loadProxy();
+  });
+}
+
+async function loadSettings() {
+  const s = await api("/api/settings");
+  // Doc text is backend-owned (English in the registry); the active locale may
+  // overlay a translation via settings.doc.<key>, else the registry doc shows.
+  const docOf = (k) => (STRINGS[locale] || {})["settings.doc." + k] ?? (s.schema[k] || {}).doc ?? "";
+  const rows = Object.entries(s.values).map(([k, v]) => `<tr><td class="mono tiny">${esc(k)}</td>
+    <td><input class="mono" data-key="${esc(k)}" value="${esc(JSON.stringify(v))}"></td>
+    <td class="tiny muted">${esc(docOf(k))}</td></tr>`).join("");
+  el("set-body").innerHTML = card(t("settings.title"), `<table><thead><tr><th>key</th><th>${t("settings.col_value")}</th><th>${t("settings.col_note")}</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="row tight" style="margin-top:10px"><button id="set-save" class="primary">${t("settings.save_all")}</button></div>`);
+  el("set-save").onclick = async () => {
+    const patch = {};
+    document.querySelectorAll("input[data-key]").forEach(i => {
+      try { const now = JSON.parse(s.values[i.dataset.key] === undefined ? null : JSON.stringify(s.values[i.dataset.key]));
+        const next = JSON.parse(i.value); if (JSON.stringify(next) !== JSON.stringify(s.values[i.dataset.key])) patch[i.dataset.key] = next;
+      } catch (e) { alert(fmt("settings.invalid_json", { value: i.dataset.key })); }
+    });
+    if (!Object.keys(patch).length) { alert(t("settings.nothing_changed")); return; }
+    await api("/api/settings", { method: "PATCH", body: JSON.stringify(patch) }); loadSettings();
+  };
+}
+
+async function followLogs() {
+  el("log-out").textContent = t("log.waiting");
+  const res = await fetch("/api/logs/stream?seconds=60", { headers: { authorization: "Bearer " + token() } });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n"); buffer = parts.pop();
+    for (const part of parts) {
+      if (!part.startsWith("data:")) continue;
+      try { const j = JSON.parse(part.slice(5));
+        if (j.type === "init") { el("log-out").textContent = (j.lines || []).map(l => l.line).join("\n"); }
+        else { el("log-out").textContent += "\n" + j.line; el("log-out").scrollTop = el("log-out").scrollHeight; }
+      } catch (e) {}
+    }
+  }
+  el("log-out").textContent += "\n" + t("log.done");
+}
+
+const views = { overview: loadOverview, requests: loadRequests, connections: loadConnections,
+  nodes: loadNodes, keys: loadKeys, proxy: loadProxy, settings: loadSettings, logs: followLogs };
+  // 'logs' was once missing from this map: clicking the Log tab then died on
+  // `views[view] is not a function` and show() rendered the error card. Found during
+  // the route audit, not while building the UI.
+
+async function show(view) {
+  document.querySelectorAll(".tab").forEach(tab => tab.setAttribute("aria-selected", String(tab.dataset.view === view)));
+  document.querySelectorAll("main section").forEach(s => s.classList.add("hidden"));
+  el("view-" + view).classList.remove("hidden");
+  el("gate").classList.add("hidden");
+  try { await views[view](); } catch (e) {
+    if (e.status === 401 || e.status === 503) { el("gate").classList.remove("hidden"); el("gate-error").textContent = e.message; }
+    else el("view-" + view).innerHTML = `<div class="card">
+      <img class="mascot theme-dark" src="/static/assets/engrix-mascot-error-dark.svg" alt="error">
+      <img class="mascot theme-light" src="/static/assets/engrix-mascot-error-light.svg" alt="error">
+      <h3>${esc(t("ui.error"))}</h3><pre class="code">${esc(e.message)}</pre></div>`;
+  }
+}
+
+document.querySelectorAll(".tab").forEach(tab => tab.onclick = () => show(tab.dataset.view));
+el("btn-refresh").onclick = () => show(document.querySelector('.tab[aria-selected="true"]').dataset.view);
+el("btn-lang-en").onclick = () => setLocale("en");
+el("btn-lang-id").onclick = () => setLocale("id");
+el("btn-theme").onclick = () => {
+  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  try { localStorage.setItem("engrixrouter_theme", next); } catch (e) {}
+  el("favicon").href = next === "dark" ? "/static/assets/engrix-favicon-dark.svg" : "/static/assets/engrix-favicon-light.svg";
+};
+el("token-save").onclick = () => { setToken(el("token-input").value.trim()); applyAuthUI(); show("overview"); loadHealth(); };
+el("btn-signout").onclick = () => { setToken(""); location.reload(); };
+el("req-load").onclick = loadRequests;
+el("log-follow").onclick = followLogs;
+
+(async function boot() {
+  document.documentElement.setAttribute("lang", locale);
+  applyAuthUI();
+  markLocale();
+  applyI18n();
+  await loadHealth();
+  if (token()) { await show("overview"); }
+})();
+</script>
+</div>
+</body>
+</html>

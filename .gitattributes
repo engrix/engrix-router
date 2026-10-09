@@ -1,0 +1,25 @@
+# Line endings: kerja di Windows, CI di Linux. Normalisasi sekali di commit pertama
+# biar diff berikutnya gak nge-change satu file penuh cuma gara-gara CRLF.
+* text=auto eol=lf
+
+# Binary: jangan pernah disentuh filter line-ending.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pyc binary
+*.so binary
+*.dll binary
+*.sqlite3 binary
+*.db binary
+*.whl binary
+*.zip binary
+*.pdf binary
+
+# File yang emang harus tetap CRLF kalau pernah ada (belum ada sekarang, jaga-jalan
+# satu kasus: file .bat buat jalanin gateway di Windows).
+*.bat text eol=crlf
+*.cmd text eol=crlf

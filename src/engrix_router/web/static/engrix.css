@@ -1,0 +1,250 @@
+/* engrix-router :: tema ENGRIX
+   Token disalin IDENTIK dari engrix-agent/web/src/styles/tokens.css
+   (sumber resminya: assets/engrix-brand-pack).
+   Yang dipertahankan: palet dua tema, nama token legacy --emerald (ramp violet)
+   dan --cyan (ramp sekunder), radius 4/8/12, permukaan kode selalu gelap,
+   scanline overlay, glow hemat (neon berlebihan = "murahan").
+   Yang TIDAK disalin: nama token yang cuma dipakai dashboard engrix (tree/chip
+   khusus chat) -- gak relevan di sini.
+
+   Default tema = DARK (#0B0F14): violet primary-nya memang versi gelap.
+   Ada toggle light buat yang mau terang. */
+
+:root {
+  --bg: #ffffff;
+  --bg-elevated: #fbfaf8;
+  --surface: #f4f3ef;
+  --surface-hi: #edece6;
+  --surface-3: #e4e3db;
+  --sidebar-bg: #f4f3ef;
+  --border: #d3d1c7;
+  --border-strong: #b9b7ab;
+  --chrome-hi: #2a3442;
+  --chrome-1: #333f4e;
+  --chrome-4: #7a8794;
+  --violet: #7b61ff;
+  --emerald: #7b61ff;
+  --emerald-soft: rgba(123, 97, 255, 0.13);
+  --emerald-faint: rgba(123, 97, 255, 0.06);
+  --emerald-mid: #5b43c9;
+  --emerald-deep: #46339c;
+  --emerald-ink: #ffffff;
+  --cyan: #7c5ce0;
+  --cyan-soft: rgba(124, 92, 224, 0.13);
+  --text: #0b0f14;
+  --text-dim: #4c545e;
+  --text-faint: #6d7885;
+  --text-ink: #ffffff;
+  --ok: #0f9d58;
+  --warn: #b7791f;
+  --warn-soft: rgba(183, 121, 31, 0.14);
+  --danger: #d33a3a;
+  --danger-soft: rgba(211, 58, 58, 0.12);
+  --info: #2563eb;
+  --code-bg: #0b0f14;
+  --code-line: #2a3442;
+  --glow-violet: 0 0 10px rgba(123, 97, 255, 0.14);
+  --shadow-card: 0 6px 20px rgba(23, 20, 12, 0.08), 0 1px 3px rgba(23, 20, 12, 0.06);
+  --scanline: rgba(11, 15, 20, 0.022);
+  --font-ui: "Inter", -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Courier New", Consolas, monospace;
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+
+html[data-theme="dark"] {
+  --bg: #0b0f14;
+  --bg-elevated: #0e141b;
+  --surface: #121821;
+  --surface-hi: #18212d;
+  --surface-3: #1d2836;
+  --sidebar-bg: #080b10;
+  --border: #2a3442;
+  --border-strong: #3a4757;
+  --chrome-hi: #ffffff;
+  --chrome-1: #f6f8fb;
+  --chrome-4: #7c8b9e;
+  --violet: #7b61ff;
+  --emerald: #8f79ff;
+  --emerald-soft: rgba(123, 97, 255, 0.18);
+  --emerald-faint: rgba(123, 97, 255, 0.08);
+  --emerald-mid: #5b43c9;
+  --emerald-deep: #3a2c86;
+  --emerald-ink: #f4f1ff;
+  --cyan: #a78bfa;
+  --cyan-soft: rgba(167, 139, 250, 0.16);
+  --text: #ffffff;
+  --text-dim: #9daab9;
+  --text-faint: #8b9aab;
+  --text-ink: #0b0f14;
+  --ok: #34d399;
+  --warn: #f5d76e;
+  --warn-soft: rgba(245, 215, 110, 0.12);
+  --danger: #ff5c5c;
+  --danger-soft: rgba(255, 92, 92, 0.12);
+  --info: #7fb3ff;
+  --code-bg: #06090d;
+  --code-line: #1a2330;
+  --glow-violet: 0 0 12px rgba(123, 97, 255, 0.16);
+  --shadow-card: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --scanline: rgba(255, 255, 255, 0.014);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { height: 100%; margin: 0; }
+
+body {
+  background-color: var(--bg);
+  background-image: radial-gradient(1200px 760px at 50% -260px, var(--emerald-faint), transparent 60%);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+  background-image: repeating-linear-gradient(0deg, var(--scanline) 0 1px, transparent 1px 3px);
+}
+
+:focus-visible { outline: 1px solid var(--emerald); outline-offset: 1px; }
+::selection { background: var(--emerald-soft); color: var(--text); }
+
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 6px; border: 2px solid var(--bg); }
+
+a { color: var(--emerald); }
+code, pre, .mono { font-family: var(--font-mono); font-size: 12.5px; }
+
+/* ── kerangka: sidebar kiri, konten kanan ── */
+.shell { display: flex; min-height: 100vh; }
+
+/* Belum login = halaman gate polos; sidebar cuma relevan setelah masuk. */
+.shell.locked .sidebar { display: none; }
+.shell.locked main { padding: 0 16px; }
+
+.sidebar {
+  flex: 0 0 236px; display: flex; flex-direction: column; gap: 18px;
+  padding: 18px 14px 16px; background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+}
+.brand { display: flex; flex-direction: column; gap: 6px; padding: 0 4px; }
+.brand .logo { height: 22px; width: auto; align-self: flex-start; }
+.brand .ver { color: var(--text-faint); font-family: var(--font-mono); font-size: 11.5px; }
+
+.tabs { display: flex; flex-direction: column; gap: 2px; }
+.tab {
+  border: 1px solid transparent; background: transparent; border-radius: var(--radius);
+  color: var(--text-dim); padding: 8px 12px; cursor: pointer; font: inherit;
+  text-align: left; width: 100%;
+}
+.tab:hover:not([aria-selected="true"]) {
+  background: var(--surface-hi); color: var(--text); box-shadow: none; border-color: transparent;
+}
+.tab[aria-selected="true"] {
+  background: var(--emerald-faint); color: var(--text); border-color: var(--border);
+  box-shadow: inset 2px 0 0 var(--emerald);
+}
+
+.sidebar-foot { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
+.sidebar-foot .row.tight { gap: 6px; }
+.sidebar-foot .row.tight > button { flex: 1 1 0; min-width: 0; }
+.sidebar-foot > button.tight { width: 100%; }
+
+main { flex: 1; min-width: 0; padding: 22px 26px 48px; }
+main > section { max-width: 1160px; margin: 0 auto; }
+
+@media (max-width: 880px) {
+  .shell { flex-direction: column; }
+  .sidebar { position: static; height: auto; flex: none; border-right: none; border-bottom: 1px solid var(--border); }
+  .tabs { flex-direction: row; flex-wrap: wrap; }
+  .tab { width: auto; }
+  main { padding: 16px 14px 40px; }
+}
+
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(268px, 1fr)); }
+/* Card = header band dengan garis pembatas, pola dock-panel-header engrix-agent/web. */
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 0 0 12px; box-shadow: var(--shadow-card); overflow: hidden;
+}
+.card h3 {
+  margin: 0 0 12px; padding: 9px 14px; border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--surface-hi), var(--bg-elevated));
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .18em; text-transform: uppercase; color: var(--text-dim);
+}
+.card > *:not(h3) { margin-inline: 14px; width: calc(100% - 28px); }
+.card > .mascot { width: 72px; margin: 8px auto 4px; }
+.empty-state { text-align: center; padding: 14px 0 4px; color: var(--text-dim); }
+.empty-state img { width: 56px; height: 56px; margin: 0 auto 6px; display: block; }
+.kpi { font-size: 22px; font-weight: 700; font-family: var(--font-mono); }
+.kpi small { font-size: 12px; color: var(--text-faint); font-weight: 500; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--text-dim); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; }
+tbody tr:hover { background: var(--surface-hi); }
+td.num, th.num { white-space: nowrap; }
+
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11.5px;
+  font-family: var(--font-mono); border: 1px solid var(--border); background: var(--surface-hi);
+}
+.badge.ok { color: var(--ok); border-color: var(--ok); background: transparent; }
+.badge.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+.badge.err { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+.badge.info { color: var(--info); border-color: var(--info); background: transparent; }
+.badge.violet { color: var(--emerald); border-color: var(--emerald-mid); background: var(--emerald-faint); }
+
+button, .btn {
+  font: inherit; background: var(--surface-hi); color: var(--text); border: 1px solid var(--border-strong);
+  border-radius: var(--radius); padding: 6px 12px; cursor: pointer;
+}
+button:hover:not(:disabled) { box-shadow: var(--glow-violet); border-color: var(--emerald-mid); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.primary { background: var(--emerald); color: var(--emerald-ink); border-color: var(--emerald-deep); }
+
+input, select, textarea {
+  font: inherit; background: var(--bg-elevated); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; width: 100%;
+}
+label { display: block; font-size: 11.5px; color: var(--text-dim); margin: 8px 0 3px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row > * { flex: 1 1 180px; }
+.row > .tight { flex: 0 0 auto; }
+
+pre.code {
+  background: var(--code-bg); border: 1px solid var(--code-line); border-radius: var(--radius);
+  padding: 10px 12px; overflow: auto; max-height: 320px; margin: 0;
+}
+.muted { color: var(--text-dim); }
+.tiny { font-size: 11.5px; }
+.hidden { display: none !important; }
+
+.stage { border-left: 2px solid var(--emerald-mid); padding: 4px 0 8px 10px; margin: 8px 0; }
+.stage .who { font-family: var(--font-mono); font-size: 11.5px; color: var(--emerald); }
+
+.gate {
+  max-width: 520px; margin: 12vh auto; padding: 20px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-card);
+}
+.gate img { width: 64px; display: block; margin: 0 auto 12px; }
+.gate .gate-logo { height: 40px; width: auto; margin: 0 auto 14px; }
+.gate .mascot { width: 88px; }
+.mascot { display: block; }
+.card .mascot { width: 72px; margin: 0 auto 10px; }
+#view-requests .card { margin-bottom: 12px; }
+
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* Gambar brand punya dua varian (gelap/terang); tema aktif memilih satu.
+   Dipasang paling akhir dengan qualifier img supaya menang atas .gate img. */
+img.theme-light { display: none; }
+html[data-theme="light"] img.theme-light { display: block; }
+html[data-theme="light"] img.theme-dark { display: none; }

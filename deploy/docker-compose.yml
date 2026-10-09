@@ -1,0 +1,49 @@
+# engrix-router for docker compose.
+#
+# From the repository root:   docker compose -f deploy/docker-compose.yml up -d --build
+# Or from this directory:     docker compose up -d --build
+#
+# Configuration comes from the .env file at the repository root (copied from
+# .env.example). The container sets EROUTER_HOST=0.0.0.0 itself -- that is safe only
+# because of the publishing rules below.
+services:
+  engrix-router:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: engrix-router:0.1.0
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      # The bind decision inside the container; see the loud comment in deploy/Dockerfile.
+      EROUTER_HOST: 0.0.0.0
+      EROUTER_DATA_DIR: /data
+    volumes:
+      # Host path is relative to THIS file, so the database lands in deploy/data/.
+      # Point it somewhere you back up deliberately and never publish: this directory
+      # holds the SQLite file with every upstream vendor token in it.
+      - ./data:/data
+    # ── HOW TO EXPOSE THIS SAFELY ────────────────────────────────────────────
+    # Loopback-only publishing is the default: the port is reachable from the host
+    # and from a reverse proxy running on it, and from nothing else.
+    #   1. Reverse proxy (recommended): terminate TLS + authenticate at caddy/nginx
+    #      on 443, proxy to 127.0.0.1:8450, and keep the mapping below as it is.
+    #   2. Port-forward / SSH tunnel / VPN or tailscale serve: same mapping, nothing
+    #      listening on the public interface at all.
+    #   3. Never bind "8450:8450" (that means 0.0.0.0 on the host) on a machine that
+    #      faces the public internet. This gateway holds upstream tokens, writes
+    #      conversation payloads, and spends real money per request; an open port is
+    #      an open bill plus an account-ban risk for whatever vendor sits behind it.
+    # If you must publish more widely, do it through a proxy that authenticates, and
+    # set EROUTER_ADMIN_TOKEN to something long and random first.
+    ports:
+      - "127.0.0.1:8450:8450"
+    # Read-only root filesystem: the app is installed at build time and writes only
+    # under /data (the volume above) and /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp
+    # The container healthcheck lives in deploy/Dockerfile, nothing to add here.
+    init: true
+    stop_grace_period: 30s

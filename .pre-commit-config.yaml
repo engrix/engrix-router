@@ -1,0 +1,49 @@
+# Repository hygiene gates. `pre-commit` is in the [dev] extra of pyproject.toml.
+#
+#   pip install -e .[dev]
+#   pre-commit install          # needs network: the remote hook repos are fetched here
+#
+# Only the `local` hook below runs fully offline, which is why it carries the rules that
+# actually matter in this repo. The remote hooks fix formatting noise, not correctness, so
+# nothing here is allowed to hold a change hostage.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-docstring-first
+
+  # ruff is the intended linter (it is a [dev] dependency), but the tree is not clean under
+  # it yet, so this is wired as a MANUAL-stage hook: it cannot block a commit today. Drop
+  # `stages: [manual]` once CI stops running it with continue-on-error.
+  # It is also not installed in the owner's environment, so the local run below is the only
+  # way to execute it until `pip install -e .[dev]` has been run.
+  # local run: python -m ruff check src tests scripts
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        name: "ruff check (manual: the repo is not lint-clean yet)"
+        stages: [manual]
+        args: [--fix]
+
+  # Secret scanning. Commented out because the hook downloads the gitleaks binary, so it
+  # needs network access in CI and cannot be verified from a machine without it.
+  # - repo: https://github.com/gitleaks/gitleaks
+  #   rev: v8.18.4
+  #   hooks:
+  #     - id: gitleaks
+
+  # The real gate: this repo's own guards, run offline against the staged tree.
+  # - no reverse-engineered vendor material (ADR-0002)
+  # - language policy: English where operators and clients read, Indonesian in comments only
+  # - no stale module paths left behind by a rename (ADR-0003)
+  - repo: local
+    hooks:
+      - id: repo-guards
+        name: repository guards (private material, language policy, stale references)
+        entry: python -m pytest -q tests/test_no_private_material.py tests/test_language_policy.py tests/test_comment_language.py tests/test_no_stale_references.py tests/test_hygiene.py
+        language: system
+        pass_filenames: false
+        always_run: true
