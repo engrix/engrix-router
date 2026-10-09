@@ -1,6 +1,9 @@
 """
 Process configuration: paths and environment.
 
+The `EROUTER_` prefix (Engrix + Router) is public API: it is deliberate and stable, and a
+future rename would ship as a documented alias, never a silent break.
+
 The boundary is deliberate so this never turns into config soup:
   - this file = anything that needs a restart: paths, host/port, env secrets,
     size limits, process-level HTTP/TLS deadlines.
@@ -112,7 +115,7 @@ REDACT_HEADERS = [
     h.strip().lower()
     for h in _raw(
         "EROUTER_REDACT_HEADERS",
-        "authorization,x-api-key,x-goog-api-key,cookie,set-cookie,x-gw-user-id,cosy-key,x-9r-cli-token",
+        "authorization,x-api-key,x-goog-api-key,cookie,set-cookie,x-gw-user-id",
     ).split(",")
     if h.strip()
 ]

@@ -87,7 +87,8 @@ Vendor keys, custom encoding alphabets, undocumented endpoint paths and imperson
 client-identity headers do not go into this repository at any point — not in code, not in
 docs, not in a test fixture. `tests/test_no_private_material.py` fails when they appear, and
 `data/`, `knowledge/` and `credentials/` are gitignored for the same reason. That material
-lives in `engrix-router-providers`, one private distribution holding every such adapter.
+lives in the separate private provider distribution that [ADR-0002](docs/adr/0002-public-core-private-providers.md)
+records -- one distribution holding every such adapter.
 
 ## Certificate
 

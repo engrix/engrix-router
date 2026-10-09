@@ -94,7 +94,7 @@ finding that out an hour later costs an hour.
 ## Non-negotiables when something cannot be verified
 
 * Do not invent a shape you have not measured. An unverified path stays unimplemented, and
-  the README/ADR says why (see the Qoder PAT exchange and Anthropic image blocks).
+  the README/ADR says why (examples: a private adapter's PAT exchange, Anthropic image blocks).
 * Do not report a number you did not produce. A claim of "tested" without a runnable
   artifact is worse than admitting the gap.
 * Do not rename, move, or delete files you did not write without saying so explicitly.

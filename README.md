@@ -25,9 +25,11 @@ no guardrails, no response cache that rewrites answers, no reinterpretation of t
 the client sent ([ADR-0000](docs/adr/0000-philosophy-and-boundaries.md)). Config comes from the
 client, and the client must not be able to tell it talks to a gateway.
 
-The behaviour was ported from a reference implementation (9router v0.5.95) whose measured
-defects this build does not reproduce. The porting map and the deliberate deviations are in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Read `docs/adr/` first -- start with 0000.
+The behaviour was ported from a reference implementation (9router v0.5.95, MIT-licensed) whose
+measured defects this build does not reproduce; no source code was copied. The porting map and
+the deliberate deviations are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and the license
+attribution is in [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md). Read `docs/adr/` first -- start
+with 0000.
 
 ## Dashboard
 
@@ -206,18 +208,21 @@ to kill:
 * two sources claiming one model prefix raise `DuplicatePrefix` at startup instead of letting
   one shadow the other.
 
-One private distribution, `engrix-router-providers` (ADR-0002), holds every
-reverse-engineered subscription adapter -- one module or folder per
-vendor, not one repository per vendor, because discovery takes a list and separate repos would
-only multiply the CI and the version pins. Such an adapter attaches through mechanism 2 or 3 and
-registers its own runtime knobs itself, through `settings.register_defaults({...}, owner="<vendor>")`,
-so the public `DEFAULTS` registry stays free of vendor keys. Its reverse-engineered wire material
-stays with it, and
-[tests/test_no_private_material.py](tests/test_no_private_material.py) keeps it out of this repo.
+Adapters whose vendor protocol is not public live outside this repository, in a separate
+private distribution; the boundary and its reasoning are recorded in
+[ADR-0002](docs/adr/0002-public-core-private-providers.md). One distribution holds them all
+(one module or folder per vendor), because discovery takes a list and separate repositories
+would only multiply the CI and the version pins. Such an adapter attaches through mechanism
+2 or 3 and registers its own runtime knobs through
+`settings.register_defaults({...}, owner="<vendor>")`, so the public `DEFAULTS` registry stays
+free of vendor keys. [tests/test_no_private_material.py](tests/test_no_private_material.py)
+enforces the other direction: vendor-specific material never enters this repository.
 
 ## Environment
 
 Every variable read in `src/engrix_router/core/config.py`. All optional unless noted.
+The `EROUTER_` prefix (**E**ngrix **ROUTER**) is part of the public API: it is fixed, and a
+future rename would ship as a documented alias, never a silent break.
 
 | variable | default | purpose |
 |---|---|---|
@@ -258,6 +263,7 @@ enter the database or the API.
 * [SECURITY.md](SECURITY.md) -- what the gateway holds, and the private reporting channel.
 * [CONTRIBUTING.md](CONTRIBUTING.md) -- setup, the boundaries a PR has to respect.
 * [CHANGELOG.md](CHANGELOG.md) -- state of the tree per release.
+* [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md) -- third-party licenses this tree honors.
 * [docs/adr/](docs/adr) -- 0000 philosophy and boundaries, 0001 canonical format,
   0002 public core / private providers, 0003 layer map, 0004 file naming.
 * [`.pre-commit-config.yaml`](.pre-commit-config.yaml) and

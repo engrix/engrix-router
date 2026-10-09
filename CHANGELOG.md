@@ -29,6 +29,16 @@ this build does not reproduce.
   taken from a scratch database with fabricated data.
 - `/static` and the dashboard page now answer `Cache-Control: no-cache` (etag revalidation
   keeps it cheap); browser heuristic caching had begun serving stale CSS.
+- `docs/ATTRIBUTION.md`: 9router v0.5.95 is MIT (verified from its own LICENSE); this tree
+  reimplements behavior and copies no source, and the notice ships regardless.
+
+### Changed
+
+- README, `.env.example`, CONTRIBUTING and this changelog no longer name the private provider
+  distribution or frame adapters as reverse-engineered; the landing surface says "pluggable
+  providers" and [ADR-0002](docs/adr/0002-public-core-private-providers.md) keeps the full
+  record. Vendor-specific example filenames were replaced with generic ones.
+- The `EROUTER_` env prefix is documented as public API and fixed (a decision, not drift).
 
 ### Fixed
 
@@ -171,8 +181,8 @@ this build does not reproduce.
   `EROUTER_LOG_FILE_MAX_BYTES`, `EROUTER_LOG_FILE_BACKUPS` drive a `RotatingFileHandler`
   (previously read into config and ignored), proven by a subprocess test because
   `logs.configure()` is a process singleton.
-- Reverse-engineered adapters live in ONE private distribution, `engrix-router-providers`
-  (ADR-0002) -- one module or package per vendor. Per-vendor repos were dropped: discovery
+- Adapters whose protocol is not public live in ONE private distribution (ADR-0002) --
+  one module or package per vendor. Per-vendor repos were dropped: discovery
   returns a list, so the only thing extra repos buy is more CI and more version pins.
 
 ### Fixed
