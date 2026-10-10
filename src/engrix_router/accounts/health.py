@@ -147,12 +147,107 @@ def gc_expired(connection_id: str | None = None, *, ts: int | None = None) -> in
     return execute("DELETE FROM model_locks WHERE locked_until <= ?", (moment,))
 
 
-def _lock_ms_for(classified: errors.Classified, *, now_ts: int) -> tuple[str, int, str]:
+def reconcile_quota_locks(connection_id: str, *, ts: int | None = None) -> int:
+    """Vendor quota says there is room -> a quota_daily lock is a false positive, drop it.
+
+    ZCode edge can emit code 1005 "exceed quota limit" for an account whose
+    entitlement endpoint still reports quota left (measured TASK-57: fresh
+    account zeno, vendor readings used=0 remaining=100%, one 1005 right after
+    its first request locked the whole account '*' until UTC midnight). The
+    quota snapshot is the vendor's own accounting, so it wins over the one-shot
+    edge error. Self-correcting: if the edge really meant it, the next request
+    1005s again and re-locks.
+
+    Only releases when EVERY measurable scope of the newest snapshot is above
+    the floor (unlimited scopes are ignored). A snapshot older than the lock is
+    not evidence. Returns number of locks released.
+    """
+    moment = now_ms() if ts is None else ts
+    locks = query(
+        "SELECT id, created_at FROM model_locks"
+        " WHERE connection_id = ? AND model = ? AND locked_until > ?"
+        " AND reason LIKE 'quota_daily%'",
+        (connection_id, ACCOUNT_WILDCARD, moment),
+    )
+    if not locks:
+        return 0
+    newest = query_one(
+        "SELECT MAX(fetched_at) AS at FROM quota_snapshots WHERE connection_id = ?",
+        (connection_id,),
+    )
+    fetched_at = int(newest["at"]) if newest and newest["at"] else 0
+    if fetched_at < max(int(lock["created_at"]) for lock in locks):
+        return 0  # snapshot lebih tua dari error yang ngunci -- bukan bukti
+    readings = query(
+        "SELECT remaining_pct, unlimited FROM quota_snapshots"
+        " WHERE connection_id = ? AND fetched_at = ?",
+        (connection_id, fetched_at),
+    )
+    measurable = [r for r in readings if not r["unlimited"] and r["remaining_pct"] is not None]
+    if not measurable:
+        return 0
+    floor = get_int("health.quota_reconcile_min_pct")
+    if min(float(r["remaining_pct"]) for r in measurable) < floor:
+        return 0
+    released = execute(
+        "DELETE FROM model_locks WHERE connection_id = ? AND model = ? AND locked_until > ?"
+        " AND reason LIKE 'quota_daily%'",
+        (connection_id, ACCOUNT_WILDCARD, moment),
+    )
+    # unavailable karena quota_daily juga ikut salah tuduhan -> turunkan ke
+    # cooling supaya self-heal is_available() tidak tetap memblokir koneksi.
+    row = query_one(
+        "SELECT test_status, error_class FROM connection_health WHERE connection_id = ?",
+        (connection_id,),
+    )
+    if row and row["test_status"] == STATUS_UNAVAILABLE and row["error_class"] == errors.CLASS_QUOTA_DAILY:
+        execute(
+            "UPDATE connection_health SET test_status = ?, error_class = NULL,"
+            " error_code = NULL, updated_at = ? WHERE connection_id = ?",
+            (STATUS_COOLING, moment, connection_id),
+        )
+    if released:
+        applog.info("health", f"reconcile {connection_id[:8]}: vendor quota has room,"
+                              f" released {released} quota_daily lock(s)")
+    return released
+
+
+_METER_EVIDENCE_MAX_AGE_MS = 15 * 60 * 1000
+
+
+def _quota_meter(connection_id: str, *, not_before: int) -> dict[str, Any]:
+    """The vendor's own reading for this connection, or {} when it cannot speak.
+
+    `not_before` rejects readings older than that moment -- a stale meter is not
+    evidence about a later failure. Used both ways: to refuse an account lock the
+    vendor's own quota contradicts, and to lock until the VENDOR's period end
+    (ZCode's is 15:59:59 UTC, 8 hours off the UTC-midnight guess we used to make).
+
+    """
+    newest = query_one("SELECT MAX(fetched_at) AS at FROM quota_snapshots WHERE connection_id = ?",
+                       (connection_id,))
+    fetched_at = int(newest["at"]) if newest and newest["at"] else 0
+    if not fetched_at or fetched_at < not_before:
+        return {}
+    rows = query("SELECT remaining_pct, unlimited, reset_at FROM quota_snapshots"
+                 " WHERE connection_id = ? AND fetched_at = ?", (connection_id, fetched_at))
+    measurable = [r for r in rows if not r["unlimited"] and r["remaining_pct"] is not None]
+    if not measurable:
+        return {}
+    resets = [int(r["reset_at"]) for r in rows if r["reset_at"]]
+    return {"min_pct": min(float(r["remaining_pct"]) for r in measurable),
+            "reset_at_ms": max(resets) if resets else None}
+
+
+def _lock_ms_for(classified: errors.Classified, *, now_ts: int,
+                 connection_id: str | None = None) -> tuple[str, int, str]:
     """
     (scope, ttl_ms, reason) for one policy. The table lives in this one place.
 
-    quota_window uses the vendor reset time when it has one, otherwise the end
-    of the UTC day, because code 110 follows the UTC calendar, not our clock.
+    quota_window ends at the vendor's own reset instant: the classified error's
+    if it carries one, else the newest meter reading's period end. Only when
+    neither exists does it fall back to the UTC-day guess -- code 110 follows a
+    calendar we do not own, and ZCode's is 15:59:59 UTC, not 00:00.
 
     """
     policy = classified.policy
@@ -175,8 +270,11 @@ def _lock_ms_for(classified: errors.Classified, *, now_ts: int) -> tuple[str, in
         # accountFallback.js:9-13 di 9router).
         return ("backoff", 0, "policy: backoff eksponensial")
     elif policy.lock == "quota_window":
-        reset = classified.reset_at
-        until = int(reset.timestamp() * 1000) if reset else now_ts + get_int("health.cooldown_auth_ms")
+        until = int(classified.reset_at.timestamp() * 1000) if classified.reset_at else None
+        if not until and connection_id:
+            until = _quota_meter(connection_id, not_before=now_ts - _METER_EVIDENCE_MAX_AGE_MS).get("reset_at_ms")
+        if not until:
+            until = now_ts + get_int("health.cooldown_auth_ms")
         return ("account", max(1000, until - now_ts), "daily quota until reset")
     elif policy.lock == "model":
         ttl = int((classified.retry_after_s or 3600) * 1000)
@@ -202,7 +300,7 @@ def register_error(connection_id: str, model: str, classified: errors.Classified
     health = get(connection_id)
     error_class = classified.error_class
 
-    scope, ttl_or_level, why = _lock_ms_for(classified, now_ts=moment)
+    scope, ttl_or_level, why = _lock_ms_for(classified, now_ts=moment, connection_id=connection_id)
     if error_class == errors.CLASS_RATE_LIMIT:
         level = min(get_int("health.backoff_max_level"), int(health["backoff_level"]) + 1)
         ttl = min(get_int("health.backoff_max_ms"), get_int("health.backoff_base_ms") * (2 ** (level - 1)))
@@ -210,6 +308,21 @@ def register_error(connection_id: str, model: str, classified: errors.Classified
     else:
         ttl = ttl_or_level
         backoff_level = int(health["backoff_level"])
+
+    # Satu "quota habis" dari edge bukan fakta kuota kalau meteran vendor bilang
+    # masih ada sisa: itu edge yang nolak, bukan akun yang kering. Tanpa guard ini
+    # akun BARU dengan 3.000.000 utuh ke-bench sampai reset (zeno, 2026-10-10
+    # 21:44:53 -- 1 detik setelah request pertama). Hukumannya turun jadi
+    # per-model sebentar; kalau memang habis, request berikutnya ngunci beneran.
+    demoted = False
+    if error_class == errors.CLASS_QUOTA_DAILY and scope == "account":
+        meter = _quota_meter(connection_id, not_before=moment - _METER_EVIDENCE_MAX_AGE_MS)
+        floor = get_int("health.quota_reconcile_min_pct")
+        if meter and meter["min_pct"] >= floor:
+            scope = "model"
+            ttl = get_int("health.anti_abuse_cooldown_ms")
+            why = f"quota_daily denied by vendor meter ({meter['min_pct']:.1f}% left)"
+            demoted = True
 
     if scope == "none":
         execute(
@@ -223,7 +336,7 @@ def register_error(connection_id: str, model: str, classified: errors.Classified
     until = moment + max(1000, ttl)
     if error_class == errors.CLASS_CREDENTIAL_DEAD:
         status = STATUS_NEEDS_REAUTH
-    elif error_class in (errors.CLASS_QUOTA_DAILY, errors.CLASS_PROTOCOL_DRIFT):
+    elif error_class in (errors.CLASS_QUOTA_DAILY, errors.CLASS_PROTOCOL_DRIFT) and not demoted:
         status = STATUS_UNAVAILABLE
     else:
         status = STATUS_COOLING

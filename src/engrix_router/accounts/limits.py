@@ -59,6 +59,15 @@ def _store(provider: str, connection_id: str, readings: list[QuotaReading]) -> N
              reading.remaining_pct, 1 if reading.unlimited else 0, reading.reset_at_ms, moment,
              json.dumps(reading.raw, ensure_ascii=False, default=str)),
         )
+    # Rekonsiliasi event-driven: snapshot baru dari vendor = bukti segar. Kalau
+    # vendor bilang masih ada quota tapi ada lock quota_daily, lock itu false
+    # positive (ZCode edge sempat salah kirim 1005 untuk akun ber-quota, TASK-57).
+    # Import lokal biar tidak bikin circular import accounts.health <-> limits.
+    from engrix_router.accounts import health
+    try:
+        health.reconcile_quota_locks(connection_id, ts=moment)
+    except Exception as exc:  # pragma: no cover - rekonsiliasi tidak boleh gagalkan simpan
+        applog.warn(applog.NS_QUOTA, f"reconcile {provider}/{connection_id[:8]}: {exc}"[:300])
 
 
 def _pct(used: float | None, total: float | None, remaining: float | None) -> float | None:

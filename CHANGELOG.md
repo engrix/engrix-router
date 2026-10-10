@@ -70,6 +70,19 @@ this build does not reproduce.
 
 ### Fixed
 
+- **A single ZCode edge 1005 no longer benches an account that still has quota.**
+  The edge can emit `1005 "exceed quota limit"` for an account whose own
+  entitlement endpoint still reports plenty left (measured TASK-57: fresh
+  account, 100% remaining on both scopes, account-wide `*` lock 8106 s one
+  second after its first request). Two guards now share one rule — the vendor's
+  quota snapshot wins over a one-shot edge error: `register_error` demotes the
+  account lock to a short per-model cooldown when the meter says there is room,
+  and a fresh snapshot (fetched at/after the lock) releases an already-installed
+  false-positive lock and cools `unavailable` back down to `cooling` via
+  `reconcile_quota_locks` (wired into quota snapshot storage, floor
+  `health.quota_reconcile_min_pct`, default 5%). Self-correcting: if the edge
+  really meant it, the next request 1005s again and re-locks for real.
+
 - **The per-model probe no longer looks like a probe, and can no longer bench a
   healthy account.** `POST /api/connections/{id}/test_models` used to send
   `max_tokens: 8` + `"reply with OK"` — the exact micro shape ZCode's edge blocks

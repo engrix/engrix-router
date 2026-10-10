@@ -217,6 +217,7 @@
   "settings.doc.catalog.ttl_s": "cache /models per koneksi",
   "settings.doc.client.retry_after_default_s": "Retry-After buat 429/503 kalau vendor nggak kasih petunjuk",
   "settings.doc.health.anti_abuse_cooldown_ms": "penolakan anti-abuse (ZCode 3012): berapa lama HANYA model itu dikunci, akun tetap hidup",
+ "settings.doc.health.quota_reconcile_min_pct": "batas sisa kuota (%) agar lock quota_daily dianggap false positive dan dilepas — meteran vendor menang atas satu error 1005 dari edge",
   "settings.doc.health.backoff_base_ms": "rate limit: 2^level * base",
   "settings.doc.health.backoff_max_level": "batas level backoff",
   "settings.doc.health.backoff_max_ms": "batas maksimum backoff rate limit",

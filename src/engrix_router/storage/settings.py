@@ -39,6 +39,8 @@ DEFAULTS: dict[str, tuple[Any, type, str]] = {
     "health.backoff_max_ms": (300_000, int, "cap backoff rate limit"),
     "health.backoff_max_level": (15, int, "cap level backoff"),
     "health.lock_plain_4xx": (False, bool, "400/406 may lock an account? default NO (anti self-DoS guard)"),
+    "health.quota_reconcile_min_pct": (5, int,
+                                       "release a quota_daily lock only when EVERY measurable vendor scope still has at least this % left"),
     "health.protocol_drift_threshold": (2, int, "how many sig_invalid/replay hits before the gateway freezes every upstream"),
     "health.self_heal_unavailable": (True, bool, "unavailable may return to cooling on its own once every lock expired"),
     # Status, bukan konfigurasi -- tapi kita persist di tabel settings supaya
