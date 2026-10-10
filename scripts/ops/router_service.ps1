@@ -95,8 +95,11 @@ function Show-Status {
 }
 
 function Install-Autostart {
-  $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Watchdog`" -Once")
+  # wscript launcher (router_watchdog_hidden.vbs): console-less. A direct
+  # powershell.exe action flashes a console window every trigger (~1s,
+  # user-visible) because conhost appears before -WindowStyle Hidden applies.
+  $vbsLauncher = Join-Path $RouterRoot "scripts\ops\router_watchdog_hidden.vbs"
+  $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbsLauncher`""
   $trigLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
   $trigRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
     -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)

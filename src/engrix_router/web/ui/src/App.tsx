@@ -10,6 +10,7 @@ import { ProvidersView } from "./view_providers";
 import { RequestsView } from "./view_requests";
 import { KeysView, NodesView, ProxyView } from "./view_connect";
 import { LogsView, SettingsView } from "./view_system";
+import { ConfirmBar } from "./components";
 
 type ViewId = "overview" | "requests" | "logs" | "providers" | "nodes" | "keys" | "proxy" | "settings";interface NavGroup { label: string; items: { id: ViewId; label: string }[] }
 
@@ -66,6 +67,53 @@ export default function App() {
     try { setHealthz(await fetch("/health").then(r => r.json())); } catch { setHealthz(null); }
   }, []);
   useEffect(() => { ping(); const tm = setInterval(ping, 20000); return () => clearInterval(tm); }, [ping]);
+
+  // Restart gateway dari dashboard: POST /api/system/restart (server menembak
+  // helper detached yang stop+start proses), lalu /health dipoll sampai server
+  // balik dengan boot baru -- semua view ke-refresh otomatis begitu hidup lagi
+  // (refreshKey++), tanpa reload halaman. Timeout bukan gagal final: watchdog
+  // di server tetap akan menyalakan lagi.
+  const [restartState, setRestartState] = useState<"idle" | "confirm" | "sent" | "waiting">("idle");
+  const [restartMsg, setRestartMsg] = useState<string | null>(null);
+  const [restartErr, setRestartErr] = useState<string | null>(null);
+
+  async function doRestart() {
+    const baseline = healthz?.uptime_s ?? 0;
+    setRestartState("sent"); setRestartMsg(t("system.restart_sending")); setRestartErr(null);
+    try { await api("/api/system/restart", { method: "POST", body: "{}" }); }
+    catch { /* respons bisa mati bersama server -- polling tetap lanjut */ }
+    setRestartState("waiting"); setRestartMsg(t("system.restart_waiting"));
+    const DOWN_DEADLINE = Date.now() + 20000;   // fase turun: server lama harus mati
+    const UP_DEADLINE = Date.now() + 100000;    // fase naik: batas total
+    let sawDown = false;
+    for (;;) {
+      if (Date.now() > UP_DEADLINE) {
+        setRestartState("idle"); setRestartMsg(null);
+        setRestartErr(fmt("system.restart_timeout", { value: 100 }));
+        return;
+      }
+      await new Promise(r => setTimeout(r, 1000));
+      let ok = false; let uptime = 0;
+      try {
+        const h = await fetch("/health").then(r => r.json());
+        ok = Boolean(h?.ok); uptime = Number(h?.uptime_s ?? 0);
+      } catch { /* masih mati */ }
+      if (!ok) { sawDown = true; continue; }
+      if (sawDown || uptime < baseline - 5) {
+        setRestartState("idle"); setRestartErr(null);
+        setRestartMsg(t("system.restart_done"));
+        setTimeout(() => setRestartMsg(null), 8000);
+        setRefreshKey(k => k + 1);
+        ping();
+        return;
+      }
+      if (Date.now() > DOWN_DEADLINE) {
+        setRestartState("idle"); setRestartMsg(null);
+        setRestartErr(t("system.restart_failed"));
+        return;
+      }
+    }
+  }
 
   // 401 dari endpoint mana pun = token mati/salah: turun ke gate, bukan
   // cuma menampilkan error di dalam view.
@@ -192,7 +240,14 @@ export default function App() {
           </span>
           <span className="grow" />
           <button className="tight tiny" onClick={() => { setRefreshKey(k => k + 1); }} title={t("top.refresh")}>{t("top.refresh")}</button>
+          {restartState === "confirm" ? (
+            <ConfirmBar text={t("system.restart_confirm")} onYes={doRestart} onNo={() => setRestartState("idle")} />
+          ) : (
+            <button className="tight tiny" disabled={restartState !== "idle"} title={t("system.restart_confirm")} onClick={() => setRestartState("confirm")}>{t("top.restart")}</button>
+          )}
           <button className="tight tiny" onClick={() => { setToken(""); setAuthed(false); }}>{t("top.signout")}</button>
+          {restartMsg && <span className="tiny muted">{restartMsg}</span>}
+          {restartErr && <span className="tiny err-text">{restartErr}</span>}
         </div>
 
         {view === "overview" && <OverviewView refreshKey={refreshKey} />}

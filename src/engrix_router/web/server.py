@@ -31,6 +31,7 @@ from engrix_router.api import (
     admin_observability,
     admin_proxy,
     admin_settings,
+    admin_system,
     anthropic,
     openai,
 )
@@ -104,6 +105,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_proxy.router)
     app.include_router(admin_observability.router)
     app.include_router(admin_settings.router)
+    app.include_router(admin_system.router)
 
     @app.get("/health", tags=["meta"])
     async def healthz() -> dict[str, object]:

@@ -52,8 +52,21 @@ function Test-Alive {
   return [bool]($proc -and $proc.ProcessName -match "python")
 }
 
+function Test-RestartPending {
+  # Dashboard /api/system/restart writes this marker; while it is fresh the
+  # restart helper owns the down window -- the watchdog must not race it.
+  $marker = Join-Path $RouterRoot "logs\restart-requested.json"
+  if (-not (Test-Path $marker)) { return $false }
+  try {
+    $j = Get-Content $marker -Raw | ConvertFrom-Json
+    $ageMs = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() - [int64]$j.requested_at_ms
+    return ($ageMs -ge 0 -and $ageMs -lt 90000)
+  } catch { return $false }
+}
+
 function Invoke-Check {
   if (Test-Alive) { return $false }
+  if (Test-RestartPending) { Write-Log "restart requested via dashboard -- watchdog skips this cycle"; return $false }
   Write-Log "ROUTER DOWN (no process / port $Port closed) -> starting via router_service.ps1"
   & $Service -Command start 2>&1 | ForEach-Object { Write-Log ("  " + $_) }
   if (Test-Alive) {
