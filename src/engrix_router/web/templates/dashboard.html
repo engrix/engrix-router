@@ -43,14 +43,17 @@
     </div>
 
     <nav class="tabs" id="tabs" aria-label="Views">
+      <div class="nav-group" data-i18n="nav.group.monitor"></div>
       <button class="tab" data-view="overview" aria-selected="true" data-i18n="nav.overview"></button>
       <button class="tab" data-view="requests" aria-selected="false" data-i18n="nav.requests"></button>
-      <button class="tab" data-view="connections" aria-selected="false" data-i18n="nav.connections"></button>
+      <button class="tab" data-view="logs" aria-selected="false" data-i18n="nav.logs"></button>
+      <div class="nav-group" data-i18n="nav.group.connect"></div>
+      <button class="tab" data-view="providers" aria-selected="false" data-i18n="nav.providers"></button>
       <button class="tab" data-view="nodes" aria-selected="false" data-i18n="nav.nodes"></button>
       <button class="tab" data-view="keys" aria-selected="false" data-i18n="nav.keys"></button>
       <button class="tab" data-view="proxy" aria-selected="false" data-i18n="nav.proxy"></button>
+      <div class="nav-group" data-i18n="nav.group.system"></div>
       <button class="tab" data-view="settings" aria-selected="false" data-i18n="nav.settings"></button>
-      <button class="tab" data-view="logs" aria-selected="false" data-i18n="nav.logs"></button>
     </nav>
 
     <div class="sidebar-foot">
@@ -82,7 +85,13 @@
     <p id="gate-error" class="tiny" style="color:var(--danger)"></p>
   </div>
 
-  <section id="view-overview"><div id="client-hint"></div><div class="grid" id="kpis"></div><div id="tables"></div></section>
+  <section id="view-overview">
+    <div class="tiles" id="kpis"></div>
+    <div id="quota-band" style="margin-top:12px"></div>
+    <div class="grid" id="ov-side" style="margin-top:12px"></div>
+    <div id="tables" style="margin-top:12px"></div>
+    <div id="client-hint" style="margin-top:12px"></div>
+  </section>
 
   <section id="view-requests" class="hidden">
     <div class="card"><div class="row">
@@ -94,7 +103,7 @@
     <div id="req-detail"></div>
   </section>
 
-  <section id="view-connections" class="hidden"><div id="conn-body"></div></section>
+  <section id="view-providers" class="hidden"><div id="prov-body"></div></section>
   <section id="view-nodes" class="hidden"><div id="node-body"></div></section>
   <section id="view-keys" class="hidden"><div id="key-body"></div></section>
   <section id="view-proxy" class="hidden"><div id="proxy-body"></div></section>
@@ -207,22 +216,45 @@ function emptyState(label, colspan) {
 
 // Quota is the only number that decides whether this gateway can still be used
 // (vendor code 110 = the day rolls over in UTC). Read from the /api/quota snapshot,
-// which is cached for 30 seconds.
-function quotaCard(quota) {
+// which is cached for 30 seconds. Bars, not tables: an operator must read
+// "4.6M / 5M left, resets 20:00" in one glance, and the same component lives on
+// Overview AND inside every provider card -- one truth, painted twice.
+function pctClass(p) { return p === null ? "na" : p >= 50 ? "ok" : p >= 20 ? "mid" : "low"; }
+function qrow(r) {
+  const pct = (r.remaining_pct === null || r.remaining_pct === undefined) ? null : Number(r.remaining_pct);
+  const width = r.unlimited ? 100 : (pct === null ? 0 : Math.max(0, Math.min(100, pct)));
+  const cls = pctClass(pct);
+  return `<div class="qrow">
+    <div class="qname mono tiny" title="${esc(r.scope)}">${esc(r.scope)}</div>
+    <div class="qbar"><i class="${cls}" style="width:${width}%"></i></div>
+    <div class="qnum ${cls}">${r.unlimited ? t("quota.unlimited")
+      : fmt("quota.remaining", { remaining: num(r.remaining), total: num(r.total) })}${pct === null ? "" : ` <b>${esc(pct)}%</b>`}
+      ${r.reset_at ? `<span class="tiny muted">${fmt("quota.reset_at", { value: esc(clock(r.reset_at)) })}</span>` : ""}</div></div>`;
+}
+function providerQuotaHtml(p) {
+  if (!p.available) return `<p class="tiny muted">${t("quota.no_endpoint")}</p>`;
+  return (p.readings || []).map(qrow).join("") || `<p class="tiny muted">${t("quota.empty")}</p>`;
+}
+function quotaBand(quota) {
   if (quota.error) return card(t("quota.title"), `<p class="tiny" style="color:var(--danger)">${esc(quota.error)}</p>`);
-  const rows = (quota.providers || []).map(p => {
-    if (!p.available) return `<tr><td class="mono tiny">${esc(p.name || p.connection_id)}</td>
-      <td colspan="3" class="tiny muted">${t("quota.no_endpoint")}</td></tr>`;
-    return (p.readings || []).map(r => `<tr><td class="mono tiny">${esc(p.name || (p.connection_id || "").slice(0, 8))}</td>
-      <td class="tiny">${esc(r.scope)}</td>
-      <td class="tiny">${r.unlimited ? t("quota.unlimited") : fmt("quota.remaining", { remaining: num(r.remaining), total: num(r.total) })}</td>
-      <td class="tiny">${r.remaining_pct === null ? "—" : esc(r.remaining_pct) + "%"}
-        ${r.reset_at ? fmt("quota.reset_at", { value: esc(clock(r.reset_at)) }) : ""}</td></tr>`).join("");
-  }).join("");
+  const blocks = (quota.providers || []).filter(p => p.available && (p.readings || []).length)
+    .map(p => `<div class="qblock"><div class="qhead"><span class="mono">${esc(p.provider)}</span>
+        <span class="tiny muted">${esc(p.name || (p.connection_id || "").slice(0, 8))}</span></div>
+        ${p.readings.map(qrow).join("")}</div>`).join("");
   const w = quota.worst;
-  return card(t("quota.title"), `<table><thead><tr><th>${t("common.account")}</th><th>${t("common.scope")}</th><th>${t("quota.col_left")}</th><th>%</th></tr></thead>
-    <tbody>${rows || emptyState(t("quota.empty"), 4)}</tbody></table>
-    ${w ? `<div class="tiny muted" style="margin-top:6px">${fmt("quota.worst", { provider: esc(w.provider), scope: esc(w.scope), remaining: num(w.remaining) })}</div>` : ""}`);
+  return card(t("quota.title"), `${blocks || emptyState(t("quota.empty"), 1)}
+    ${w ? `<div class="tiny muted" style="margin-top:8px">${fmt("quota.worst", { provider: esc(w.provider), scope: esc(w.scope), remaining: num(w.remaining) })}</div>` : ""}`);
+}
+// Overview and the provider hub are two views of the same data: one shared snapshot
+// so both tabs show identical numbers and the vendor cache TTL is respected.
+let _quotaSnap = null;
+async function quotaSnapshot() {
+  if (!_quotaSnap) {
+    _quotaSnap = api("/api/quota")
+      .catch(e => ({ providers: [], error: e.message }))
+      .then(q => { setTimeout(() => { _quotaSnap = null; }, 25000); return q; });
+  }
+  return _quotaSnap;
 }
 
 async function loadHealth() {
@@ -235,47 +267,52 @@ async function loadHealth() {
 }
 
 async function loadOverview() {
-  const stats = await api("/api/usage/stats?period=today");
-  const state = await api("/api/state");
-  let quota = { providers: [], worst: null };
-  try { quota = await api("/api/quota"); } catch (e) { quota = { providers: [], error: e.message }; }
+  const [stats, state, quota] = await Promise.all([
+    api("/api/usage/stats?period=today"), api("/api/state"), quotaSnapshot(),
+  ]);
   const totals = stats.totals || {};
-  el("client-hint").innerHTML = card(t("overview.client_title"), `<pre class="code">POST {{CLIENT_BASE}}/v1/chat/completions
-authorization: Bearer &lt;client key -- create one in the API keys tab&gt;
-{"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "ping"}]}</pre>
-    <p class="tiny muted" style="margin:8px 0 0">${t("overview.client_note")}</p>`);
+  const healthRows = state.health.length ? state.health.map(h => `<tr><td class="mono tiny">${esc((h.connection_id || "").slice(0, 8))}</td>
+      <td>${badge(h.test_status)}</td><td class="tiny">${esc(h.error_class || "")}</td>
+      <td class="tiny">${(h.locks || []).map(l => esc(l.model) + "→" + clock(l.locked_until)).join("<br>") || ""}</td></tr>`).join("")
+      : emptyState(t("common.no_connections"), 4);
   el("kpis").innerHTML = [
-    card(t("overview.req_today"), `<div class="kpi">${num(totals.requests)} <small>req</small></div>
-      <div class="tiny muted">${fmt("overview.req_split", { ok: num(totals.ok), errors: num(totals.errors) })}</div>`),
-    card(t("overview.tokens_today"), `<div class="kpi">${num(totals.tokens)} <small>tok</small></div>
-      <div class="tiny muted">${fmt("overview.token_split", { prompt: num(totals.prompt), cached: num(totals.cached) })}</div>`),
-    card(t("overview.cost"), `<div class="kpi">${money(totals.cost)}</div>
-      <div class="tiny muted">${t("overview.cost_note")}</div>`),
-    card(t("overview.providers"), `<div class="kpi">${state.providers.length}</div>
-      <div class="tiny muted">${state.providers.map(p => `<span class="badge violet">${esc(p.id)}</span>`).join(" ")}</div>`),
+    `<div class="tile"><div class="tiny muted">${t("overview.req_today")}</div>
+      <div class="kpi">${num(totals.requests)} <small>req</small></div>
+      <div class="tiny muted">${fmt("overview.req_split", { ok: num(totals.ok), errors: num(totals.errors) })}</div></div>`,
+    `<div class="tile"><div class="tiny muted">${t("overview.tokens_today")}</div>
+      <div class="kpi">${num(totals.tokens)} <small>tok</small></div>
+      <div class="tiny muted">${fmt("overview.token_split", { prompt: num(totals.prompt), cached: num(totals.cached) })}</div></div>`,
+    `<div class="tile"><div class="tiny muted">${t("overview.cost")}</div>
+      <div class="kpi">${money(totals.cost)}</div>
+      <div class="tiny muted">${t("overview.cost_note")}</div></div>`,
+    `<div class="tile"><div class="tiny muted">${t("overview.accounts")}</div>
+      <div class="kpi">${state.providers.length} <small>prov</small></div>
+      <div class="tiny muted">${state.providers.map(p => `<span class="badge violet">${esc(p.id)}</span>`).join(" ")}</div></div>`,
+  ].join("");
+  el("quota-band").innerHTML = quotaBand(quota);
+  el("ov-side").innerHTML = [
+    card(t("overview.health"), `<table><tbody>${healthRows}</tbody></table>`),
     card(t("overview.budget"), `<table><tbody>${
         (stats.budget.rows || []).map(r => `<tr><td class="mono tiny">${esc(r.scope)}</td>
           <td class="num">${num(r.used_tokens)} / ${r.token_limit ? num(r.token_limit) : "∞"}</td>
-          <td class="num">${r.used_pct === null ? "—" : r.used_pct + "%"}</td></tr>`).join("") || emptyState(t("overview.budget_empty"), 3)
-      }</tbody></table>`),
-    card(t("overview.health"), `<table><tbody>${
-      state.health.length ? state.health.map(h => `<tr><td class="mono tiny">${esc((h.connection_id || "").slice(0, 8))}</td>
-        <td>${badge(h.test_status)}</td><td class="tiny">${esc(h.error_class || "")}</td>
-        <td class="tiny">${(h.locks || []).map(l => esc(l.model) + "→" + clock(l.locked_until)).join("<br>") || ""}</td></tr>`).join("")
-        : emptyState(t("common.no_connections"), 4)}</tbody></table>`),
-    quotaCard(quota),
+          <td class="num">${r.used_pct === null ? "—" : r.used_pct + "%"}</td></tr>`).join("")
+          || emptyState(t("overview.budget_empty"), 3)}</tbody></table>`),
     card(t("overview.drift"), `<div>${badge(state.drift.tripped ? "unavailable" : "active")}</div>
       <div class="tiny muted">${esc(state.drift.reason || t("overview.no_trip"))}</div>
       ${state.drift.tripped ? '<div class="row tight"><button id="drift-clear">' + t("overview.unfreeze") + '</button></div>' : ""}`),
   ].join("");
   const dc = el("drift-clear");
-  if (dc) dc.onclick = async () => { await api("/api/drift/clear", { method: "POST" }); loadOverview(); loadHealth(); };
+  if (dc) dc.onclick = async () => { await api("/api/drift/clear", { method: "POST" }); _quotaSnap = null; loadOverview(); loadHealth(); };
   el("tables").innerHTML = card(t("overview.usage_provider"), `<table><thead><tr><th>${t("common.provider")}</th><th>${t("common.req")}</th><th>${t("common.token")}</th><th>${t("common.cost")}</th><th>${t("common.failed")}</th></tr></thead>
     <tbody>${(stats.by_provider || []).map(r => `<tr><td class="mono">${esc(r.provider)}</td><td>${num(r.requests)}</td>
       <td>${num(r.tokens)}</td><td>${money(r.cost)}</td><td>${num(r.errors)}</td></tr>`).join("") || emptyState(t("overview.no_traffic"), 5)}</tbody></table>`)
     + card(t("overview.usage_model"), `<table><thead><tr><th>${t("common.provider")}</th><th>${t("common.model")}</th><th>${t("common.req")}</th><th>${t("common.token")}</th><th>${t("common.cost")}</th></tr></thead>
     <tbody>${(stats.by_model || []).map(r => `<tr><td class="mono tiny">${esc(r.provider)}</td><td class="mono tiny">${esc(r.model)}</td>
       <td>${num(r.requests)}</td><td>${num(r.tokens)}</td><td>${money(r.cost)}</td></tr>`).join("") || emptyState(t("overview.no_traffic"), 6)}</tbody></table>`);
+  el("client-hint").innerHTML = card(t("overview.client_title"), `<details><summary class="tiny muted">${t("overview.client_note")}</summary>
+    <pre class="code" style="margin-top:8px">POST {{CLIENT_BASE}}/v1/chat/completions
+authorization: Bearer &lt;client key -- create one in the API keys tab&gt;
+{"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "ping"}]}</pre></details>`);
 }
 
 async function loadRequests() {
@@ -311,32 +348,67 @@ async function showTrace(rid) {
       ${stages || '<p class="muted tiny">' + t("trace.no_stages") + '</p>'}`);
 }
 
-async function loadConnections() {
-  const providers = await api("/api/providers");
-  const conns = await api("/api/connections");
-  el("conn-body").innerHTML = card(t("conn.providers"), `<table><thead><tr><th>id</th><th>base_url</th><th>${t("conn.col_auth")}</th><th>${t("conn.col_probe")}</th><th>${t("conn.col_quota")}</th><th>${t("conn.col_connections")}</th><th></th></tr></thead><tbody>${
-    providers.map(p => `<tr><td class="mono">${esc(p.id)}${p.is_node ? ' <span class="badge violet tiny">' + t("conn.node_badge") + '</span>' : ""}</td>
-      <td class="mono tiny">${esc(p.base_url)}</td><td class="tiny">${esc(p.auth_modes.join(","))}</td>
-      <td class="tiny">${esc(p.probe_tier)}</td><td>${p.has_usage ? badge("active") : badge("unknown")}</td>
-      <td class="tiny">${p.active_connections}/${p.connections}</td>
-      <td class="row tight">${p.oauth ? '<button class="tiny oauth" data-provider="' + esc(p.id) + '">' + t("conn.oauth_add") + '</button>' : ''}</td></tr>`).join("")}</tbody></table>`)
-    + card(t("conn.connections"), `<table><thead><tr><th>${t("common.name")}</th><th>${t("common.provider_model")}</th><th>${t("conn.col_priority")}</th><th>${t("common.active")}</th><th>${t("conn.col_health")}</th><th>${t("common.token")}</th><th></th></tr></thead><tbody>${
-      conns.map(c => `<tr><td>${esc(c.name || c.email)}</td><td class="mono tiny">${esc(c.provider)}</td>
-        <td class="tiny">${esc(c.priority)}</td><td class="tiny">${c.is_active ? t("common.yes") : t("common.no")}</td>
-        <td>${badge((c.health || {}).test_status || "unknown")} <span class="tiny muted">${esc((c.health || {}).error_class || "")}</span></td>
-        <td class="tiny">${c.expires_at ? esc(c.expires_at) : (c.has_api_key ? t("conn.api_key_label") : "—")}</td>
-        <td class="row tight"><button class="tiny test" data-id="${esc(c.id)}">${t("conn.test")}</button>
-          <button class="tiny cat" data-id="${esc(c.id)}">${t("conn.catalog")}</button>
-          <button class="tiny mdl" data-id="${esc(c.id)}">${t("conn.test_models")}</button></td></tr>`).join("")
-        || emptyState(t("conn.empty"), 7)}</tbody></table>
-      <div id="conn-out"></div>
-      <form id="conn-form" class="grid" style="margin-top:12px">
+async function loadProviders() {
+  const [providers, conns, quota] = await Promise.all([
+    api("/api/providers"), api("/api/connections"), quotaSnapshot(),
+  ]);
+  // One card per provider: accounts, health, quota bars and the OAuth+ button of
+  // the same vendor live under one roof now. Quota readings are keyed by
+  // connection id, so every account shows its own bars, not a merged blur.
+  const byProv = {};
+  conns.forEach(c => (byProv[c.provider] = byProv[c.provider] || []).push(c));
+  const qByConn = {};
+  (quota.providers || []).forEach(p => { if (p.available) qByConn[p.connection_id] = p.readings || []; });
+  const cards = providers.map(p => {
+    const accounts = byProv[p.id] || [];
+    const rows = accounts.map(c => {
+      const h = c.health || {};
+      const bars = (qByConn[c.id] || []).map(qrow).join("");
+      return `<div class="acct">
+        <div class="acct-head">
+          <span class="mono tiny">${esc(c.name || (c.id || "").slice(0, 8))}</span>
+          ${badge(h.test_status || "unknown")}
+          <span class="tiny muted">${esc(h.error_class || "")}</span>
+          <span class="tiny muted">${c.is_active ? t("common.active") : t("common.no")}</span>
+          <span class="tiny muted mono">${c.expires_at ? esc(c.expires_at) : (c.has_api_key ? t("conn.api_key_label") : "—")}</span>
+          <span class="acct-actions row tight">
+            <button class="tiny test" data-id="${esc(c.id)}">${t("conn.test")}</button>
+            <button class="tiny cat" data-id="${esc(c.id)}">${t("conn.catalog")}</button>
+            <button class="tiny mdl" data-id="${esc(c.id)}">${t("conn.test_models")}</button>
+          </span></div>
+        ${bars}
+      </div>`;
+    }).join("");
+    return card(`${esc(p.id)}${p.is_node ? " · " + t("conn.node_badge") : ""}`, `
+      <div class="row tight prov-meta">
+        <span class="mono tiny">${esc(p.base_url)}</span>
+        <span class="tiny muted mono">${esc(p.auth_modes.join(" · "))}</span>
+        <span class="tiny muted">${t("conn.col_probe")}: ${esc(p.probe_tier)}</span>
+        <span class="tiny muted">${p.active_connections}/${p.connections} ${t("conn.col_connections")}</span>
+        ${p.oauth ? `<button class="tiny primary oauth" data-provider="${esc(p.id)}">${t("conn.oauth_add")}</button>` : ""}
+      </div>
+      ${rows || emptyState(t("conn.no_accounts"), 1)}`);
+  }).join("");
+  el("prov-body").innerHTML = `
+    <div class="row tight sec-tools"><button id="prov-refresh">${t("conn.refresh_quota")}</button></div>
+    ${cards}
+    ${card(t("conn.add_manual"), `
+      <form id="prov-form" class="grid">
         <div><label>provider</label><input name="provider" required placeholder="${esc(t("conn.provider_ph"))}"></div>
         <div><label>${t("common.name")}</label><input name="name" placeholder="${esc(t("conn.name_ph"))}"></div>
         <div><label>auth_type</label><input name="auth_type" value="apikey"></div>
         <div><label>api_key / access_token</label><input name="api_key" type="password"></div>
         <div class="tight" style="align-self:flex-end"><button class="primary">${t("common.add")}</button></div>
-      </form>`);
+      </form>
+      <div id="prov-out"></div>`)}`;
+  el("prov-refresh").onclick = async () => {
+    const b = el("prov-refresh");
+    b.disabled = true; b.textContent = "…";
+    try { _quotaSnap = Promise.resolve(await api("/api/quota?force=true")); }
+    catch (e) { _quotaSnap = Promise.resolve({ providers: [], error: e.message }); }
+    setTimeout(() => { _quotaSnap = null; }, 25000);
+    loadProviders();
+  };
   document.querySelectorAll("button.test").forEach(b => b.onclick = async () => {
     b.disabled = true; b.textContent = "…";
     try { const r = await api(`/api/connections/${b.dataset.id}/test`, { method: "POST" });
@@ -351,7 +423,7 @@ async function loadConnections() {
     b.disabled = true;
     try {
       const started = await api(`/api/oauth/${encodeURIComponent(b.dataset.provider)}/start`, { method: "POST" });
-      el("conn-out").innerHTML = card(t("conn.oauth_add"),
+      el("prov-out").innerHTML = card(t("conn.oauth_add"),
         `<p class="tiny"><a href="${esc(started.authorize_url)}" target="_blank" rel="noreferrer">${esc(started.authorize_url)}</a></p>
          <p class="tiny muted" id="oauth-status">${t("conn.oauth_waiting")}</p>`);
       const timer = setInterval(async () => {
@@ -362,10 +434,10 @@ async function loadConnections() {
         clearInterval(timer);
         const line = el("oauth-status");
         if (line) line.textContent = step.status === "ready" ? fmt("conn.oauth_linked", { id: step.connection_id }) : t("conn.oauth_failed");
-        if (step.status === "ready") loadConnections(); else b.disabled = false;
+        if (step.status === "ready") loadProviders(); else b.disabled = false;
       }, Math.max(2, started.poll_interval_sec || 5) * 1000);
     } catch (e) {
-      el("conn-out").innerHTML = card(t("conn.oauth_add"), `<p class="code" style="color:var(--danger)">${esc(e.message)}</p>`);
+      el("prov-out").innerHTML = card(t("conn.oauth_add"), `<p class="code" style="color:var(--danger)">${esc(e.message)}</p>`);
       b.disabled = false;
     }
   });
@@ -376,7 +448,7 @@ async function loadConnections() {
     b.disabled = true; b.textContent = "…";
     try {
       const r = await api(`/api/connections/${b.dataset.id}/models?force=true`);
-      el("conn-out").innerHTML = card(fmt("conn.catalog_title", { value: b.dataset.id.slice(0, 8) }), r.ok
+      el("prov-out").innerHTML = card(fmt("conn.catalog_title", { value: b.dataset.id.slice(0, 8) }), r.ok
         ? `<table><thead><tr><th>${t("common.model")}</th><th>${t("common.name")}</th><th>${t("conn.col_context")}</th><th>${t("conn.col_vision")}</th><th>${t("conn.col_tools")}</th></tr></thead><tbody>${
             (r.models || []).map(m => `<tr><td class="mono tiny">${esc(m.id)}</td><td class="tiny">${esc(m.name)}</td>
               <td class="tiny">${num(m.context_length)}</td><td class="tiny">${m.supports_vision ? t("common.yes") : "—"}</td>
@@ -393,7 +465,7 @@ async function loadConnections() {
     try {
       const r = await api(`/api/connections/${b.dataset.id}/test_models`,
         { method: "POST", body: JSON.stringify({ allow_spend: true, max_models: 2 }) });
-      el("conn-out").innerHTML = card(fmt("conn.test_models_title", { value: b.dataset.id.slice(0, 8) }),
+      el("prov-out").innerHTML = card(fmt("conn.test_models_title", { value: b.dataset.id.slice(0, 8) }),
         `<table><thead><tr><th>${t("common.model")}</th><th>ok</th><th>${t("conn.col_latency")}</th><th>${t("common.error")}</th></tr></thead><tbody>${
           (r.results || []).map(x => `<tr><td class="mono tiny">${esc(x.model)}</td><td>${badge(x.ok ? "ok" : "upstream_error")}</td>
             <td class="tiny">${num(x.latency_ms)}ms</td><td class="tiny mono">${esc(x.error_class || "")} ${esc(x.error || "")}</td></tr>`).join("")
@@ -402,12 +474,12 @@ async function loadConnections() {
     } catch (e) { b.textContent = t("common.error"); b.title = e.message; }
     b.disabled = false;
   });
-  el("conn-form").onsubmit = async (ev) => {
+  el("prov-form").onsubmit = async (ev) => {
     ev.preventDefault();
     const f = Object.fromEntries(new FormData(ev.target).entries());
     const payload = { provider: f.provider, name: f.name, auth_type: f.auth_type || "apikey" };
     if (f.api_key) payload[f.auth_type === "oauth" ? "access_token" : "api_key"] = f.api_key;
-    try { await api("/api/connections", { method: "POST", body: JSON.stringify(payload) }); loadConnections(); }
+    try { await api("/api/connections", { method: "POST", body: JSON.stringify(payload) }); loadProviders(); }
     catch (e) { alert(e.message); }
   };
 }
@@ -530,7 +602,7 @@ async function followLogs() {
   el("log-out").textContent += "\n" + t("log.done");
 }
 
-const views = { overview: loadOverview, requests: loadRequests, connections: loadConnections,
+const views = { overview: loadOverview, requests: loadRequests, providers: loadProviders,
   nodes: loadNodes, keys: loadKeys, proxy: loadProxy, settings: loadSettings, logs: followLogs };
   // 'logs' was once missing from this map: clicking the Log tab then died on
   // `views[view] is not a function` and show() rendered the error card. Found during

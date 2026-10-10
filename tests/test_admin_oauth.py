@@ -144,7 +144,9 @@ def test_dashboard_wires_the_oauth_button_and_core_mounts_the_router():
 
     html = (pathlib.Path(admin_oauth.__file__).resolve().parents[1]
             / "web" / "templates" / "dashboard.html").read_text(encoding="utf-8")
-    assert 'button class="tiny oauth"' in html
+    assert 'button class="tiny primary oauth"' in html or "button.oauth" in html
+    # TASK-42: tab Connections digabung jadi hub Providers -- tombol OAuth+
+    # pindah dari tabel ke kartu provider (class "tiny primary oauth").
     assert "/api/oauth/${encodeURIComponent(b.dataset.provider)}/start" in html
     assert "conn.oauth_waiting" in html and "conn.oauth_linked" in html
 

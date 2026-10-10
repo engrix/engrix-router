@@ -248,3 +248,55 @@ pre.code {
 img.theme-light { display: none; }
 html[data-theme="light"] img.theme-light { display: block; }
 html[data-theme="light"] img.theme-dark { display: none; }
+
+/* ── dashboard v2 (TASK-42): nav groups, tiles, quota bars, provider cards ── */
+.nav-group {
+  margin: 14px 4px 4px; color: var(--text-faint);
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  letter-spacing: .16em; text-transform: uppercase;
+}
+.nav-group:first-child { margin-top: 0; }
+
+.tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.tile {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; box-shadow: var(--shadow-card);
+}
+.tile .kpi { font-size: 20px; }
+
+.qrow {
+  display: grid; grid-template-columns: minmax(120px, 200px) 1fr minmax(170px, 280px);
+  gap: 10px; align-items: center; padding: 5px 0; border-bottom: 1px dashed var(--border);
+}
+.qrow:last-child { border-bottom: none; }
+.qname { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qbar { height: 8px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
+.qbar i { display: block; height: 100%; border-radius: 4px; }
+.qbar i.ok { background: var(--ok); }
+.qbar i.mid { background: var(--warn); }
+.qbar i.low { background: var(--danger); }
+.qnum { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qnum.ok { color: var(--ok); } .qnum.mid { color: var(--warn); } .qnum.low { color: var(--danger); }
+.qnum.na { color: var(--text-faint); }
+.qnum b { font-family: var(--font-mono); }
+
+.qblock { padding: 8px 0; border-bottom: 1px dashed var(--border); }
+.qblock:last-of-type { border-bottom: none; }
+.qhead { display: flex; gap: 8px; align-items: baseline; margin-bottom: 2px; }
+.qhead .mono:first-child { color: var(--text); font-weight: 600; }
+
+.sec-tools { margin-bottom: 10px; }
+
+.acct { padding: 8px 0; border-bottom: 1px dashed var(--border); }
+.acct:last-child { border-bottom: none; }
+.acct-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.acct-head .mono { font-weight: 600; color: var(--text); }
+.acct-actions { margin-left: auto; }
+.prov-meta { padding-bottom: 8px; border-bottom: 1px dashed var(--border); margin-bottom: 6px; }
+.prov-meta > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prov-meta .oauth { margin-left: auto; }
+
+@media (max-width: 720px) {
+  .qrow { grid-template-columns: 1fr; gap: 3px; }
+  .acct-actions { margin-left: 0; }
+}
