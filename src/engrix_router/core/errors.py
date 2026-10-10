@@ -169,6 +169,11 @@ _RETRY_AFTER_RE = re.compile(r'"retryAfterSeconds"\s*:\s*(\d+)')
 _PRICING_URL_RE = re.compile(r"pricingurl", re.I)
 _CONCURRENCY_TEXT_RE = re.compile(
     r"concurrency[ _-]?(limit|max)|too many concurrent", re.I)
+# Qoder gateway wrapper: HTTP 429 dengan {"code":"provider_error","message":"All
+# backends failed"} artinya backend vendor qoder sedang gagal total, BUKAN akun
+# kita di-rate-limit. Kalau jatuh ke rate_limited, backoff eksponensial ngunci
+# akun sehat 64->128->300 detik padahal masalahnya di sisi vendor (TASK-46).
+_PROVIDER_ERROR_RE = re.compile(r"provider_error|all backends failed", re.I)
 _RATE_TEXT_RE = re.compile(
     r"rate limit|too many requests|quota exceeded|capacity|overloaded|throttl", re.I
 )
@@ -266,6 +271,10 @@ def classify(
     if code == "3009" or _CONCURRENCY_TEXT_RE.search(lowered):
         return make(CLASS_MODEL_CONCURRENCY, body or "model concurrency slot busy",
                     retry_after_s=3)
+    # 4c) kegagalan backend vendor (Qoder provider_error "All backends failed"):
+    # masalahnya di sisi vendor, bukan akun -- jangan backoff eksponensial akun.
+    if _PROVIDER_ERROR_RE.search(lowered) and "rate" not in lowered:
+        return make(CLASS_UPSTREAM_UNAVAILABLE, body or "vendor backends unavailable")
     # 5) rate limit generik.
     if status == 429 or _RATE_TEXT_RE.search(lowered):
         return make(CLASS_RATE_LIMIT, body or "rate limited")
