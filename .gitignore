@@ -28,3 +28,4 @@ dist/
 src/engrix_router/web/static/ui/
 # npm toolchain
 node_modules/
+tests/_test.sqlite3
