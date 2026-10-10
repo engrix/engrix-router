@@ -15,6 +15,26 @@ this build does not reproduce.
 
 ### Added
 
+- OAuth+ account linking: `/api/oauth/{provider}/start` + `/api/oauth/{provider}/{session}`
+  run the vendor's own browser login flow (provider packages contribute `oauth_start` /
+  `oauth_poll` hooks; core owns the session state machine, single-use expiry, local
+  poll throttling and the one-row `connections.create` persistence). The dashboard's
+  Connections tab shows an OAuth+ button for every provider that supports it and paints
+  the resulting account without the operator ever pasting a token. 9router's counterpart
+  is manual token pasting; the link path here never sees a raw vendor token in a form.
+- Reasoning accounting: a streamed `reasoning_content` delta with no `reasoning_tokens`
+  in the vendor usage block is estimated (chars/4) into `requests.reasoning` instead of
+  staying zero; TTFT is now stamped on the first frame carrying visible text or
+  thinking, not on an empty role/ping frame (measures first seen token, not handshake).
+- ZCode vendor classification: edge anti-abuse code 3012 ("unusual activity") maps to
+  the daily-quota class with an UTC-midnight reset instead of `upstream_unavailable`,
+  so the router stops hammering a gated route instead of retrying into the flag.
+- Registry: the same provider module discovered through two paths (installed entry
+  point + `EROUTER_PROVIDERS_PATH` under an editable install) no longer raises
+  `DuplicatePrefix` — only genuinely different modules claiming one prefix do.
+
+### Added
+
 - Dashboard: sidebar layout with the official brand lockup, standalone sign-in gate,
   animated brand-pack mascots (gate, error card, every empty table state), card header
   bands with dividers, and a "Client quick start" card that prints the live base URL.

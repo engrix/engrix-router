@@ -133,6 +133,15 @@ def _delta_content_len(frame: dict[str, Any]) -> int:
     return total
 
 
+def _delta_reasoning_len(frame: dict[str, Any]) -> int:
+    # # Delta reasoning (thinking) yang udah keluar ke klien. Bukan konten,
+    # # cuma dipakai buat estimate token reasoning yg gak dilaporkan vendor.
+    total = 0
+    for choice in frame.get("choices") or []:
+        total += len(str((choice.get("delta") or {}).get("reasoning_content") or ""))
+    return total
+
+
 def _completion_as_chunk(response: dict[str, Any], *, model: str) -> dict[str, Any]:
     """
     Wrap a chat.completion into a single chunk.
@@ -238,8 +247,16 @@ async def _dispatch(
                         usage_acc = usage_mod.merge(usage_acc, found)
                     signals_acc = usage_mod.merge_signals(
                         signals_acc, usage_mod.vendor_signals(chunk.get("usage")))
-                    trace.note_first_token()
-                    trace.note_frame(_delta_content_len(chunk))
+                    content_len = _delta_content_len(chunk)
+                    reasoning_len = _delta_reasoning_len(chunk)
+                    # # ttft = token KLIEN pertama yang benar-benar terlihat
+                    # # (konten atau thinking). Frame kosong (message_start/ping/
+                    # # usage-only) dulu ikut nge-set TTFT, jadi angka 605ms itu
+                    # # RTT handshake — bukan latency model. Yang ngukur RTT murni
+                    # # tetap trace.stage UPSTREAM_IN.
+                    if content_len or reasoning_len:
+                        trace.note_first_token()
+                    trace.note_frame(content_len, reasoning_chars=reasoning_len)
                     yield chunk
             else:
                 response = await provider.complete(request)
@@ -251,7 +268,9 @@ async def _dispatch(
                 signals_acc = usage_mod.merge_signals(
                     signals_acc, usage_mod.vendor_signals(response.get("usage")))
                 trace.note_first_token()
-                trace.note_frame(_delta_content_len(_completion_as_chunk(response, model=model)))
+                chunk0 = _completion_as_chunk(response, model=model)
+                trace.note_frame(_delta_content_len(chunk0),
+                                 reasoning_chars=_delta_reasoning_len(chunk0))
                 yield _completion_as_chunk(response, model=str(payload.get("model") or model))
             trace.attach_usage(usage_acc, signals=signals_acc)
             budget.settle(reservation, int(usage_acc.get("total") or 0))

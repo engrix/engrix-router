@@ -79,6 +79,7 @@ class RequestTrace:
         self.status = STATUS_IN_FLIGHT
         self.dry_run = False
         self._client_seen_chars = 0
+        self._reasoning_seen_chars = 0
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def record(self) -> None:
@@ -129,15 +130,24 @@ class RequestTrace:
         if self.ttft_ms is None:
             self.ttft_ms = now_ms() - self.started_ms
 
-    def note_frame(self, client_text_chars: int = 0) -> None:
+    def note_frame(self, client_text_chars: int = 0,
+                   reasoning_chars: int = 0) -> None:
         self.frames += 1
         self._client_seen_chars += max(0, int(client_text_chars))
+        self._reasoning_seen_chars += max(0, int(reasoning_chars))
 
     @property
     def seen_content_chars(self) -> int:
         """Content characters already delivered to the client -- the basis of the
         completion estimate when the upstream sends no usage at all."""
         return self._client_seen_chars
+
+    @property
+    def seen_reasoning_chars(self) -> int:
+        """Reasoning characters delivered; vendors that omit reasoning_tokens
+        (Anthropic-style thinking blocks) still get an honest chars/4 estimate
+        from this -- see contract.reasoning_estimate_chars."""
+        return self._reasoning_seen_chars
 
     def attach_usage(self, usage: dict[str, Any] | None,
                      *, signals: dict[str, Any] | None = None) -> None:
@@ -146,6 +156,13 @@ class RequestTrace:
 
         if usage_mod.has_any(usage):
             self.usage = usage_mod.canonicalize(usage)
+        if not self.usage.get("reasoning") and self._reasoning_seen_chars:
+            # # Vendor yang nge-stream thinking tapi gak nyantumin reasoning_tokens
+            # # di blok usage (anthropic-style) — estimasi chars/4 biar kolom
+            # # requests.reasoning gak nol palsu. Estimate, bukan angka vendor;
+            # # yang bedain cuma sumbernya (frames vs usage), jadi disimpan sebagai
+            # # tambahan field usage yang emang nampung reasoning.
+            self.usage["reasoning"] = max(1, self._reasoning_seen_chars // 4)
         for key in ("billable", "credits", "credits_original"):
             if signals and signals.get(key) is not None:
                 setattr(self, key, signals[key])

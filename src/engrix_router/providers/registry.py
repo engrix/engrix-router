@@ -69,6 +69,11 @@ _by_prefix: dict[str, ProviderDef] = {}
 _class_by_id: dict[str, type] = {}
 _load_errors: dict[str, str] = {}
 _prefix_owner: dict[str, str] = {}
+# Modul yang declare tiap prefix. Dua jalur discovery (entry point + EROUTER_PROVIDERS_PATH)
+# bisa nemuin FILE yang sama saat paket di-install `pip install -e` DAN dev override aktif
+# sekaligus -- itu bukan tabrakan, itu modul yang sama. Yang dilarang: dua modul BERBEDA
+# mengklaim prefix sama (routing jadi lempar koin).
+_prefix_module: dict[str, Any] = {}
 _node_cache: dict[str, dict[str, Any]] | None = None
 _discovered = False
 
@@ -81,6 +86,7 @@ def _discover(*, force: bool = False) -> dict[str, ProviderDef]:
         _by_prefix.clear()
         _class_by_id.clear()
         _prefix_owner.clear()
+        _prefix_module.clear()
         _load_errors.clear()
         for source, name, load in _sources():
             label = f"{source}:{name}"
@@ -119,10 +125,16 @@ def _register(module: Any, label: str) -> None:
         for prefix in definition.prefixes:
             holder = _prefix_owner.get(prefix)
             if holder is not None and holder != label:
+                if _prefix_module.get(prefix) is module:
+                    # Satu modul yang sama ketemu lewat dua jalur discovery (entry point
+                    # + EROUTER_PROVIDERS_PATH saat paket ter-install editable): satu
+                    # objek, satu kelas -- bukan koin, label pertama tetap punya prefix.
+                    continue
                 raise DuplicatePrefix(
                     f"provider prefix '{prefix}' is declared twice: {holder} and {label}"
                 )
             _prefix_owner[prefix] = label
+            _prefix_module[prefix] = module
             _by_prefix[prefix] = definition
             _class_by_id[definition.id] = klass
 

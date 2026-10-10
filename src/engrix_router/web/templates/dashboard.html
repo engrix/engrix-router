@@ -314,11 +314,12 @@ async function showTrace(rid) {
 async function loadConnections() {
   const providers = await api("/api/providers");
   const conns = await api("/api/connections");
-  el("conn-body").innerHTML = card(t("conn.providers"), `<table><thead><tr><th>id</th><th>base_url</th><th>${t("conn.col_auth")}</th><th>${t("conn.col_probe")}</th><th>${t("conn.col_quota")}</th><th>${t("conn.col_connections")}</th></tr></thead><tbody>${
+  el("conn-body").innerHTML = card(t("conn.providers"), `<table><thead><tr><th>id</th><th>base_url</th><th>${t("conn.col_auth")}</th><th>${t("conn.col_probe")}</th><th>${t("conn.col_quota")}</th><th>${t("conn.col_connections")}</th><th></th></tr></thead><tbody>${
     providers.map(p => `<tr><td class="mono">${esc(p.id)}${p.is_node ? ' <span class="badge violet tiny">' + t("conn.node_badge") + '</span>' : ""}</td>
       <td class="mono tiny">${esc(p.base_url)}</td><td class="tiny">${esc(p.auth_modes.join(","))}</td>
       <td class="tiny">${esc(p.probe_tier)}</td><td>${p.has_usage ? badge("active") : badge("unknown")}</td>
-      <td class="tiny">${p.active_connections}/${p.connections}</td></tr>`).join("")}</tbody></table>`)
+      <td class="tiny">${p.active_connections}/${p.connections}</td>
+      <td class="row tight">${p.oauth ? '<button class="tiny oauth" data-provider="' + esc(p.id) + '">' + t("conn.oauth_add") + '</button>' : ''}</td></tr>`).join("")}</tbody></table>`)
     + card(t("conn.connections"), `<table><thead><tr><th>${t("common.name")}</th><th>${t("common.provider_model")}</th><th>${t("conn.col_priority")}</th><th>${t("common.active")}</th><th>${t("conn.col_health")}</th><th>${t("common.token")}</th><th></th></tr></thead><tbody>${
       conns.map(c => `<tr><td>${esc(c.name || c.email)}</td><td class="mono tiny">${esc(c.provider)}</td>
         <td class="tiny">${esc(c.priority)}</td><td class="tiny">${c.is_active ? t("common.yes") : t("common.no")}</td>
@@ -342,6 +343,31 @@ async function loadConnections() {
       b.textContent = r.ok ? fmt("common.ok_ms", { value: r.latency_ms }) : t("common.failed"); if (!r.ok) b.title = r.error; }
     catch (e) { b.textContent = t("common.error"); b.title = e.message; }
     b.disabled = false;
+  });
+  // OAuth+ : core owns the session + persistence; the authorize link comes
+  // untouched from the provider package. The page polls at the vendor's own
+  // interval and repaints the list the moment the account lands.
+  document.querySelectorAll("button.oauth").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try {
+      const started = await api(`/api/oauth/${encodeURIComponent(b.dataset.provider)}/start`, { method: "POST" });
+      el("conn-out").innerHTML = card(t("conn.oauth_add"),
+        `<p class="tiny"><a href="${esc(started.authorize_url)}" target="_blank" rel="noreferrer">${esc(started.authorize_url)}</a></p>
+         <p class="tiny muted" id="oauth-status">${t("conn.oauth_waiting")}</p>`);
+      const timer = setInterval(async () => {
+        let step;
+        try { step = await api(`/api/oauth/${encodeURIComponent(b.dataset.provider)}/${started.session_id}`); }
+        catch (e) { step = { status: "failed", error: e.message }; }
+        if (step.status === "pending") return;
+        clearInterval(timer);
+        const line = el("oauth-status");
+        if (line) line.textContent = step.status === "ready" ? fmt("conn.oauth_linked", { id: step.connection_id }) : t("conn.oauth_failed");
+        if (step.status === "ready") loadConnections(); else b.disabled = false;
+      }, Math.max(2, started.poll_interval_sec || 5) * 1000);
+    } catch (e) {
+      el("conn-out").innerHTML = card(t("conn.oauth_add"), `<p class="code" style="color:var(--danger)">${esc(e.message)}</p>`);
+      b.disabled = false;
+    }
   });
   // Catalog = the vendor's own model_config copy for that account (costs 0 credit).
   // It is force-read (?force=true) on purpose: this tab is exactly where we check

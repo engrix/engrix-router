@@ -27,6 +27,7 @@ from engrix_router.api import (
     admin_connections,
     admin_keys,
     admin_nodes,
+    admin_oauth,
     admin_observability,
     admin_proxy,
     admin_settings,
@@ -99,6 +100,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_keys.router)
     app.include_router(admin_nodes.router)
     app.include_router(admin_connections.router)
+    app.include_router(admin_oauth.router)
     app.include_router(admin_proxy.router)
     app.include_router(admin_observability.router)
     app.include_router(admin_settings.router)

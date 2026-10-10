@@ -37,6 +37,10 @@ async def list_providers() -> list[dict[str, Any]]:
             "auth_modes": list(definition.auth_modes),
             "probe_tier": definition.probe_tier,
             "features": sorted(definition.features),
+            # # OAuth+ = provider ini nyediain alur link lewat browser (hook
+            # # oauth_start/oauth_poll dari paket provider); UI nge-render
+            # # tombolnya cuma kalau flag ini bener.
+            "oauth": (hasattr(registry.get_provider(definition.id), "oauth_start")),
             "has_usage": definition.transport.usage is not None,
             "models_declared": [model.id for model in definition.models],
             "connections": len(rows),

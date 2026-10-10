@@ -23,7 +23,9 @@ Hard rules of this module:
 Lock policy per class mirrors config/errorConfig.js:59-86 (401/402/403/404 ->
 120 s; rate-limit/quota/capacity/overloaded text -> exponential backoff capped at
 5 min; no match -> 30 s; plain 4xx -> NOT locked, accountFallback.js:59-61), plus
-the vendor classes 9router handles separately (codes 110 / 112 / 10605 / 103).
+the vendor classes 9router handles separately (codes 110 / 112 / 10605 / 103), plus
+the ZCode edge anti-abuse code 3012 (TASK-37: per-route POST block, resets at UTC
+midnight, any retry inside the window only extends it).
 """
 from __future__ import annotations
 
@@ -165,6 +167,7 @@ _SIG_RE = re.compile(r"signature invalid|signature mismatch|invalid signature", 
 _REPLAY_RE = re.compile(r"duplicate request", re.I)
 _BILLING_TEXT_RE = re.compile(r"billing|daily usage limit|usage limit for chat", re.I)
 _EXPIRED_TOKEN_RE = re.compile(r"login expired|token (?:expired|invalid)|invalid_grant", re.I)
+_UNUSUAL_ACTIVITY_RE = re.compile(r"unusual activity", re.I)
 
 
 def _next_utc_midnight(now: datetime | None = None) -> datetime:
@@ -172,7 +175,7 @@ def _next_utc_midnight(now: datetime | None = None) -> datetime:
     return (base + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-_SPECIAL_CODES = {"103", "110", "112", "10605"}
+_SPECIAL_CODES = {"103", "110", "112", "10605", "3012"}
 
 
 def classify_vendor_code(raw: str | None) -> str | None:
@@ -253,6 +256,15 @@ def classify(
     # 5) rate limit generik.
     if status == 429 or _RATE_TEXT_RE.search(lowered):
         return make(CLASS_RATE_LIMIT, body or "rate limited")
+    # 5b) ZCode edge anti-abuse (vendor code 3012): HTTP 405 "unusual activity". TASK-40
+    # membuktikan pemicunya BENTUK BODY di origin (micro-probe ditolak, body ber-scaffold
+    # 200 dalam menit yang sama), jadi kelas error tetap quota_daily (503, lock jendela)
+    # biar router tidak hammer, tapi adapter wajib seed shape (zcode._seed_shape).
+    if code == "3012" or _UNUSUAL_ACTIVITY_RE.search(lowered):
+        reset = _next_utc_midnight(now)
+        wait = max(60, int((reset - (now or datetime.now(timezone.utc))).total_seconds()))
+        return make(CLASS_QUOTA_DAILY, body or "upstream anti-abuse block",
+                    retry_after_s=wait, reset_at=reset)
     # 6) kredensial mati (401/403 tanpa tanda billing) -> jangan 403 ke klien.
     if status in (401, 403) or _EXPIRED_TOKEN_RE.search(lowered):
         return make(CLASS_CREDENTIAL_DEAD, body or "upstream rejected the credentials", retry_after_s=120)
