@@ -26,7 +26,10 @@ PRIVATE_MARKERS = [
     "ENGRIX-AGENT" + "-SANDBOX",             # the private RE sandbox
 ]
 
-SKIP_DIR_PARTS = {"__pycache__", "data", "knowledge", ".pytest_cache", "build", ".venv", ".git"}
+SKIP_DIR_PARTS = {"__pycache__", "data", "knowledge", ".pytest_cache", "build", ".venv", ".git",
+                  # dependency npm bukan materi repo: tidak bisa dibetulkan dari
+                  # sini, dan isinya di luar kendali guard ini.
+                  "node_modules"}
 SCAN_EXT = {".py", ".md", ".sql", ".html", ".toml", ".txt", ".cfg", ".yaml", ".yml", ".json", ".example"}
 
 # Yang WAJIB di-ignore: dapur, DB berisi prompt nyata, dan kredensial.

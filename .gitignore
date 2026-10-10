@@ -23,3 +23,8 @@ knowledge/
 build/
 dist/
 *.spec
+
+# Dashboard SPA build output (npm run build di web/ui; source-nya yang di-commit)
+src/engrix_router/web/static/ui/
+# npm toolchain
+node_modules/

@@ -1,0 +1,23 @@
+{
+  "name": "engrix-dashboard-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Operator dashboard SPA (React + Vite). Builds into src/engrix_router/web/static/ui, served by dashboard.py. Labels live in web/strings catalogs -- never hardcode operator-visible text here (ADR-0000).",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

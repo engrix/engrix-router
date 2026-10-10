@@ -42,8 +42,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 engrix_router = [
   "schema.sql",
-  "web/templates/*.html",
   "web/static/*.css",
+  "web/static/ui/*.html",
+  "web/static/ui/assets/*",
   "web/static/assets/*",
   # label operator ikut ter-bundle (ADR-0000): tanpa dua file ini dashboard.py
   # raise saat import di instalasi wheel.

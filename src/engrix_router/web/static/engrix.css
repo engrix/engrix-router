@@ -295,6 +295,9 @@ html[data-theme="light"] img.theme-dark { display: none; }
 .prov-meta { padding-bottom: 8px; border-bottom: 1px dashed var(--border); margin-bottom: 6px; }
 .prov-meta > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .prov-meta .oauth { margin-left: auto; }
+/* badge & tombol di baris meta: seukuran teksnya, bukan melar penuh
+   (default `.row > *` bikin "reports usage" jadi balok selebar kartu) */
+.prov-meta .badge, .acct-head .badge, .acct-head .tiny { flex: 0 0 auto; }
 
 @media (max-width: 720px) {
   .qrow { grid-template-columns: 1fr; gap: 3px; }

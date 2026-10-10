@@ -40,6 +40,10 @@ def _fresh(provider: str, connection_id: str, ttl_s: int) -> dict[str, Any] | No
     )
     return {
         "cached": True,
+        # Jalur fresh menjawab dengan available=True/False; cache wajib membawa
+        # bentuk yang sama atau filter UI (p.available) membuang semua reading
+        # hasil cache sehabis restart (TASK-44). Ada baris => available.
+        "available": True,
         "fetched_at": int(row["fetched_at"]),
         "readings": [dict(item) for item in rows],
     }
@@ -130,10 +134,17 @@ def history(provider: str, *, limit: int = 200) -> list[dict[str, Any]]:
 
 
 def worst_remaining() -> dict[str, Any] | None:
-    """The most critical row across each connection's newest snapshot, for the banner."""
+    """The most critical row across each connection's newest snapshot, for the banner.
+
+    "newest" is per connection, not global: every connection is fetched at its own
+    moment, so a global MAX(fetched_at) would only ever consider the last connection
+    that was polled and hide a 0%-left row from an earlier one.
+    """
     rows = query(
         "SELECT provider, connection_id, scope, remaining, remaining_pct, reset_at, fetched_at"
-        " FROM quota_snapshots WHERE fetched_at = (SELECT MAX(fetched_at) FROM quota_snapshots)"
+        " FROM quota_snapshots"
+        " WHERE fetched_at = (SELECT MAX(q2.fetched_at) FROM quota_snapshots q2"
+        "                     WHERE q2.connection_id = quota_snapshots.connection_id)"
         " AND remaining_pct IS NOT NULL ORDER BY remaining_pct ASC LIMIT 1"
     )
     return dict(rows[0]) if rows else None

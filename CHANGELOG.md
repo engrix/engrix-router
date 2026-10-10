@@ -35,6 +35,13 @@ this build does not reproduce.
 
 ### Added
 
+- Dashboard is a React SPA now (Vite project under `web/ui`, built into `static/ui`,
+  served by `dashboard.py` which only injects the locale catalogs): grouped sidebar
+  navigation by intent, a Providers hub that merges accounts + health + per-connection
+  quota bars + the OAuth+ button into one card per vendor, countdowns next to every
+  quota row, and every operator-visible number passes a formatter — no raw epochs,
+  no unlabelled fields, no `NaN` on screen (TASK-43; the Jinja template and its
+  innerHTML painters were deleted with this).
 - Dashboard: sidebar layout with the official brand lockup, standalone sign-in gate,
   animated brand-pack mascots (gate, error card, every empty table state), card header
   bands with dividers, and a "Client quick start" card that prints the live base URL.
@@ -62,6 +69,17 @@ this build does not reproduce.
 
 ### Fixed
 
+- The quota banner's `worst_remaining()` filtered on the global `MAX(fetched_at)`:
+  with several connections polled at different moments it only ever considered the
+  last one and could hide a 0%-left row from an earlier one. It now takes each
+  connection's own newest snapshot.
+- Connection countdowns printed `NaNd NaNh NaNm`: the backend stores `expires_at` as
+  an ISO string while the formatter expected epoch-ms — `dcount()` normalizes both,
+  and remaining-percentage is clamped to 0..100 so vendor float rounding can no
+  longer render "-0% left".
+- The log tab showed a bare `aborted` badge before anything had run: opening the tab
+  now starts the 60 s tail automatically, and the badge distinguishes stopped /
+  running / finished / cancelled instead of collapsing everything into `aborted`.
 - Settings registry doc strings were partly Indonesian in an otherwise-English surface;
   they are English-only now.
 - A leaked proxy credential pair and the owner's VPS hostname in source docstrings

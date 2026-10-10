@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="{{DEFAULT_LOCALE}}">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{APP_NAME}} · {{APP_VERSION}}</title>
+<link id="favicon" rel="icon" href="/static/assets/engrix-favicon-dark.svg" />
+<link rel="stylesheet" href="/static/engrix.css" />
+<link rel="stylesheet" href="/static/app.css" />
+<!-- Locale catalogs are injected here by dashboard.py (production) or the vite
+     dev plugin (development): operator labels stay in web/strings, never in
+     components (ADR-0000). Placeholders use {{...}} and are replaced verbatim. -->
+<script>window.__ENGRIX__ = {{STRINGS_JSON}};</script>
+<script>window.__ENGRIX_LOCALE__ = "{{DEFAULT_LOCALE}}";</script>
+<script>window.__ENGRIX_BASE__ = "{{CLIENT_BASE}}";</script>
+<script type="module" src="/src/main.tsx"></script>
+</head>
+<body>
+<div id="root"></div>
+</body>
+</html>

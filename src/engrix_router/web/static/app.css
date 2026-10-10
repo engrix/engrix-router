@@ -1,0 +1,67 @@
+/* Dashboard SPA extras (TASK-43). engrix.css keeps the brand token pack and
+   the shared primitives; this file adds only what the React layout needs:
+   dot bands, quota countdown column, inline feedback, form helpers. */
+
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+.dot.ok { background: var(--ok); }
+.dot.mid { background: var(--warn); }
+.dot.low { background: var(--danger); }
+.dot.na { background: var(--text-faint); }
+
+.qrow { grid-template-columns: 10px minmax(120px, 200px) 1fr minmax(170px, 280px) minmax(150px, auto); }
+.quntil { white-space: nowrap; }
+.qnum.na { color: var(--text-faint); }
+
+.grow { flex: 1 1 auto; }
+.status-row { margin-bottom: 10px; align-items: center; }
+
+.inline-msg { margin: 6px 0 0; }
+.inline-msg.ok { color: var(--ok); }
+.inline-msg.err { color: var(--danger); }
+.err-text { color: var(--danger); }
+
+button.danger { border-color: var(--danger); color: var(--danger); }
+button.danger:hover:not(:disabled) { background: var(--danger-soft); }
+
+.confirm-bar { border: 1px solid var(--danger); border-radius: var(--radius); padding: 2px 6px; background: var(--danger-soft); }
+
+.card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.card-head h3 { margin: 0 auto 0 0; }
+.card-danger { border-color: var(--danger); }
+
+.tiny-input { font-size: 12px; padding: 4px 6px; width: auto; }
+
+.form-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; padding: 8px 0; border-bottom: 1px dashed var(--border); }
+.form-inline label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--text-dim); }
+.form-inline .chk { flex-direction: row; align-items: center; gap: 4px; }
+
+.acct-quota { margin-top: 6px; padding-left: 6px; }
+.metalabel { opacity: .75; margin-right: 2px; }
+
+tr.clickable { cursor: pointer; }
+tr.row-changed td { background: var(--warn-soft); }
+
+.trace-head { flex-wrap: wrap; gap: 8px 14px; }
+.log-box { max-height: 60vh; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+
+.created-key pre { user-select: all; }
+
+.gate form label { display: block; text-align: left; margin: 0 auto; }
+
+@media (max-width: 720px) {
+  .qrow { grid-template-columns: 10px 1fr; }
+  .qrow .qbar, .qrow .quntil { display: none; }
+}
+
+/* .row.tight = baris tombol: tiap anak harus seukuran teksnya sendiri.
+   Tanpa aturan ini, engrix.css `.row > * { flex: 1 1 180px }` bikin tiap
+   tombol Test/Catalog/Edit di kartu provider memanjang jadi balok penuh
+   dan numpuk vertikal (TASK-43). */
+.row.tight > * { flex: 0 0 auto; }
+
+/* Brand block sidebar (TASK-44): lockup SVG + versi + byline. .brand .logo
+   tinggi 22px dari engrix.css cukup buat teks; lockup di-besarkan sedikit
+   biar wordmark pixel kebaca. .byline = tagline produk di bawah versi. */
+.brand .logo { height: 26px; align-self: flex-start; }
+.brand .byline { color: var(--text-faint); font-size: 11px; line-height: 1.35; }
+.brand .ver { margin-top: -2px; }

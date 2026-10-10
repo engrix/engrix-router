@@ -45,7 +45,10 @@ ALLOWED = {
     "src/engrix_router/providers/registry.py",
     "tests/test_no_stale_references.py",
 }
-SKIP_DIR_PARTS = {"__pycache__", "data", "knowledge", ".pytest_cache", "build", ".venv", ".git"}
+SKIP_DIR_PARTS = {"__pycache__", "data", "knowledge", ".pytest_cache", "build", ".venv", ".git",
+                  # toolchain SPA (web/ui): file pihak ketiga tidak bisa dan tidak
+                  # boleh dibetulkan dari repo ini -- guard cuma buat kode sendiri.
+                  "node_modules"}
 TEXT_EXT = {".py", ".md", ".sql", ".html", ".toml", ".txt", ".cfg", ".yaml", ".yml"}
 PATH_EXT = {".py", ".md", ".css", ".html", ".toml", ".sql", ".yaml", ".yml"}
 # drive-letter + potongan path lokal owner (working dir, home, sandbox) - contoh
