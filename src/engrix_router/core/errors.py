@@ -262,13 +262,9 @@ def classify(
     # 1) protocol drift -- bukan masalah trafik, ini upstream berubah.
     if _SIG_RE.search(lowered) or (code == "103") or _REPLAY_RE.search(lowered):
         return make(CLASS_PROTOCOL_DRIFT, body or "signature/replay rejection dari upstream")
-    # 2) kuota harian (kode 110, dan 1005 yang dikirim sebagai HTTP 200) = jendela
-    # kalender, bukan cooldown biasa. Jendela diproksikan ke tengah malam UTC: untuk
-    # 110 itu memang kalendernya, untuk 1005 batas aslinya belum kita ukur dari
-    # billing. Ledakan salahnya cuma bikin akun dicoba lagi lalu kena 1005 lagi
-    # (kunci diperpanjang sendiri), bukan bikin akun sehat dikunci -- jadi aman.
-    if code == "110" or code == "1005" or _QUOTA_TEXT_RE.search(lowered) \
-            or (_BILLING_TEXT_RE.search(lowered) and "daily" in lowered):
+    # 2a) kode 110 / teks billing harian = jendela kalender UTC, itu memang
+    # kalendernya qoder.
+    if code == "110" or (_BILLING_TEXT_RE.search(lowered) and "daily" in lowered):
         reset = _next_utc_midnight(now)
         wait = max(60, int((reset - (now or datetime.now(timezone.utc))).total_seconds()))
         return make(
@@ -277,6 +273,12 @@ def classify(
             retry_after_s=wait,
             reset_at=reset,
         )
+    # 2b) 1005 "exceed quota limit" (ZCode, dikirim sebagai HTTP 200): JANGAN karang
+    # sendiri tanggal resetnya. Window vendor ada di meteran dia sendiri (period_end,
+    # 15:59:59 UTC -- meleset 8 jam dari tengah malam UTC), dan health._lock_ms_for
+    # bacanya dari sana. reset_at=None = "tanyain ke meteran".
+    if code == "1005" or _QUOTA_TEXT_RE.search(lowered):
+        return make(CLASS_QUOTA_DAILY, body or "upstream says the quota limit is reached")
     # 3) model dibayar/di-throttle per model (kode 112 + pricingUrl).
     if code == "112" or _PRICING_URL_RE.search(lowered):
         return make(CLASS_PRICING_BLOCKED, body or "this model requires a paid plan", retry_after_s=3600)

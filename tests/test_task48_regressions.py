@@ -25,7 +25,7 @@ from engrix_router.pipeline import runner
 from engrix_router.providers import anthropic as anthropic_provider
 from engrix_router.providers import registry
 from engrix_router.routing import selector
-from engrix_router.storage.sqlite import now_ms, query
+from engrix_router.storage.sqlite import execute, now_ms, query
 from engrix_router.web import server
 
 REJECTING_BODY = '{"code":3012,"msg":"request has been blocked due to unusual activity.,"}'
@@ -121,3 +121,58 @@ def test_all_locked_menghormati_jendela_lock_bukan_default_15s():
     body = response.json()["error"]
     assert body["code"] == errors.CLASS_ALL_LOCKED
     assert body["retry_after"] == retry_after
+
+
+# ── TASK-50/57: "quota habis" dari edge harus diadili sama meteran vendor ─────
+QUOTA_BODY = '{"code":1005,"msg":"exceed quota limit","logid":"20261010..."}'
+
+
+def _meter(connection_id: str, pct: float, reset_at_ms: int) -> None:
+    """Satu bacaan quota_snapshots -- ini yang jadi saksi, bukan error edge."""
+    execute(
+        "INSERT INTO quota_snapshots(provider, connection_id, scope, used, total, remaining,"
+        " remaining_pct, unlimited, reset_at, fetched_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        ("zcode", connection_id, "zcode:glm-5.3-flash", 0, 5_000_000,
+         5_000_000 * pct / 100.0, pct, 0, reset_at_ms, now_ms()))
+
+
+def test_1005_gak_ngunci_akun_kalau_meteran_masih_penuh():
+    """zeno, 2026-10-10 21:44:53: akun baru, kuota 3.000.000 utuh, satu 1005
+    ngunci '*' sampai tengah malam UTC. Meteran harus menang atas satu error."""
+    conn = connections.create(provider="anthropic", name="fresh-acct", api_key="sk-x")
+    _meter(conn["id"], 100.0, now_ms() + 6 * 3_600_000)
+
+    decision = health.register_error(conn["id"], "glm-5.3-flash",
+                                     errors.classify(status=200, text=QUOTA_BODY))
+
+    assert decision["scope"] == "model", decision
+    locks = query("SELECT model, reason FROM model_locks WHERE connection_id = ?", (conn["id"],))
+    assert [row["model"] for row in locks] == ["glm-5.3-flash"]
+    assert "denied by vendor meter" in locks[0]["reason"]
+    assert health.get(conn["id"])["test_status"] == "cooling"
+    assert health.is_available(conn["id"], "glm-5.3") is True
+
+
+def test_1005_dengan_meter_kosong_ngunci_sampai_reset_vendor_bukan_utc_midnight():
+    """Kontra: kalau meteran memang nol, akun BENS -- dan pintunya tanggal reset
+    vendor (period_end), bukan tengah malam UTC yang meleset 8 jam."""
+    conn = connections.create(provider="anthropic", name="dry-acct", api_key="sk-x")
+    reset = now_ms() + 6 * 3_600_000
+    _meter(conn["id"], 0.0, reset)
+
+    decision = health.register_error(conn["id"], "glm-5.3-flash",
+                                     errors.classify(status=200, text=QUOTA_BODY))
+
+    assert decision["scope"] == "account", decision
+    assert abs(decision["lock_ms"] - 6 * 3_600_000) < 5_000, decision
+    assert health.get(conn["id"])["test_status"] == "unavailable"
+    assert health.is_available(conn["id"], "glm-5.3") is False
+
+
+def test_tanpa_bacaan_meter_perilaku_lama_kestabil():
+    """Meteran gak bisa bicara (belum pernah di-sync) -> jangan longgarin apa-apa."""
+    conn = connections.create(provider="anthropic", name="unmetered", api_key="sk-x")
+    decision = health.register_error(conn["id"], "glm-5.3-flash",
+                                     errors.classify(status=200, text=QUOTA_BODY))
+    assert decision["scope"] == "account", decision
+    assert health.get(conn["id"])["test_status"] == "unavailable"

@@ -42,10 +42,15 @@ def _fresh_database():
 
 @pytest.fixture(autouse=True)
 def _clean_rows():
-    """Tiap tes mulai dari tabel kosong, jadi urutan file tes gak ngaruh."""
+    """Tiap tes mulai dari tabel kosong, jadi urutan file tes gak ngaruh.
+
+    Urutan = anak dulu, induk belakangan: provider_catalog, model_locks dan
+    connection_health punya FK `connection_id NOT NULL REFERENCES connections`,
+    jadi hapus `connections` duluan bikin teardown-nya IntegrityError.
+    """
     yield
     with db.transaction() as conn:
-        for table in ("request_stages", "requests", "usage_daily", "budgets", "model_locks",
-                      "connection_health", "connections", "nodes", "api_keys", "proxy_pools",
-                      "quota_snapshots", "settings", "provider_catalog"):
+        for table in ("request_stages", "requests", "usage_daily", "budgets",
+                      "provider_catalog", "quota_snapshots", "model_locks", "connection_health",
+                      "connections", "nodes", "api_keys", "proxy_pools", "settings"):
             conn.execute(f"DELETE FROM {table}")  # noqa: S608 -- nama tabel hardcoded

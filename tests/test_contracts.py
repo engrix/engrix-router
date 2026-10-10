@@ -78,7 +78,9 @@ def test_zcode_kuota_habis_datang_sebagai_http_200():
     assert c.client_status == 503
     assert c.policy.retry_internally is True
     assert c.policy.lock == "quota_window"
-    assert c.reset_at is not None and c.reset_at.tzinfo == timezone.utc
+    # Tanggal reset TIDAK dikarang di sini: window ZCode ada di meteran dia
+    # sendiri (period_end), health._lock_ms_for yang bacanya.
+    assert c.reset_at is None
 
 
 def test_qoder_queue_throttle_inner_code_wins_over_status_echo():
