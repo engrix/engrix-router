@@ -40,6 +40,7 @@ CLASS_CLIENT_NO_KEY = "client_no_key"
 CLASS_CLIENT_BAD_KEY = "client_bad_key"
 CLASS_MODEL_NOT_FOUND = "model_not_found"
 CLASS_RATE_LIMIT = "rate_limited"
+CLASS_MODEL_CONCURRENCY = "model_concurrency"  # vendor code 3009: 1 slot per model, bukan salah kita
 CLASS_QUOTA_DAILY = "quota_daily"          # vendor code 110: habis hari ini
 CLASS_PRICING_BLOCKED = "pricing_blocked"  # vendor code 112 + pricingUrl
 CLASS_QUEUE_THROTTLED = "queue_throttled"  # vendor code 10605
@@ -59,6 +60,7 @@ ALL_CLASSES = (
     CLASS_CLIENT_BAD_KEY,
     CLASS_MODEL_NOT_FOUND,
     CLASS_RATE_LIMIT,
+    CLASS_MODEL_CONCURRENCY,
     CLASS_QUOTA_DAILY,
     CLASS_PRICING_BLOCKED,
     CLASS_QUEUE_THROTTLED,
@@ -108,6 +110,11 @@ _POLICIES: dict[str, Policy] = {
     CLASS_CLIENT_BAD_KEY: Policy(401, "none", False, False, None),
     CLASS_MODEL_NOT_FOUND: Policy(404, "none", False, True, None),
     CLASS_RATE_LIMIT: Policy(429, "backoff", False, True, 15),
+    # 3009 ZCode: akun hanya boleh 1 request GLM bersamaan. Ini BUKAN hukuman
+    # buat akun: kunci cuma model itu, beberapa detik, lalu boleh dicoba lagi.
+    # Kalau digabung ke rate_limited, backoff eksponensial ngunci 1 akun sehat
+    # sampai 300 detik padahal 4 detik lagi slot-nya bebas.
+    CLASS_MODEL_CONCURRENCY: Policy(429, "model", True, True, 3),
     CLASS_QUOTA_DAILY: Policy(503, "quota_window", False, True, None),
     CLASS_PRICING_BLOCKED: Policy(503, "model", False, False, 3600),
     CLASS_QUEUE_THROTTLED: Policy(429, "short", True, True, 8),
@@ -160,6 +167,8 @@ class Classified:
 _CODE_RE = re.compile(r'"code"\s*:\s*"?(\d+)"?')
 _RETRY_AFTER_RE = re.compile(r'"retryAfterSeconds"\s*:\s*(\d+)')
 _PRICING_URL_RE = re.compile(r"pricingurl", re.I)
+_CONCURRENCY_TEXT_RE = re.compile(
+    r"concurrency[ _-]?(limit|max)|too many concurrent", re.I)
 _RATE_TEXT_RE = re.compile(
     r"rate limit|too many requests|quota exceeded|capacity|overloaded|throttl", re.I
 )
@@ -253,6 +262,10 @@ def classify(
         wait = _RETRY_AFTER_RE.search(body.replace("\\", ""))
         return make(CLASS_QUEUE_THROTTLED, body or "upstream queue throttle",
                     retry_after_s=max(8, int(wait.group(1))) if wait else 8)
+    # 4b) slot paralel model penuh (ZCode code 3009, concurrency 1/model).
+    if code == "3009" or _CONCURRENCY_TEXT_RE.search(lowered):
+        return make(CLASS_MODEL_CONCURRENCY, body or "model concurrency slot busy",
+                    retry_after_s=3)
     # 5) rate limit generik.
     if status == 429 or _RATE_TEXT_RE.search(lowered):
         return make(CLASS_RATE_LIMIT, body or "rate limited")

@@ -114,7 +114,7 @@ loopback does not get a free pass). Create one:
 ```bash
 curl -s -H "authorization: Bearer $EROUTER_ADMIN_TOKEN" -H content-type:application/json \
   -X POST http://127.0.0.1:8450/api/keys -d '{"name":"my-agent"}'
-# -> {"id": "...", "key": "egk-live-...", "key_prefix": "egk-live-...", ...}
+# -> {"id": "...", "key": "sk-er-...", "key_prefix": "sk-er-...", ...}
 ```
 
 The secret is returned exactly once and is stored as a SHA-256 hash plus a display prefix;

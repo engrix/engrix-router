@@ -35,6 +35,41 @@ export function SettingsView({ refreshKey }: { refreshKey: number }) {
       .sort();
   }, [doc, q]);
 
+  // Rak per kategori (TASK-45): satu tabel flat 50 baris itu bukan config
+  // UI, itu dump. Namespace kunci = kategorinya (budget.*, health.*, ...),
+  // knob provider (zcode.*, qoder.*) otomatis jadi rak sendiri karena
+  // register_defaults mewajibkan prefix id provider. Provider baru = rak
+  // baru, tanpa perlu sentuh kode UI.
+  const groups = useMemo(() => {
+    const map: Record<string, string[]> = {};
+    for (const k of keys) {
+      const g = doc?.schema[k]?.group || k.split(".", 1)[0];
+      (map[g] = map[g] || []).push(k);
+    }
+    return map;
+  }, [doc, keys]);
+  const CORE_ORDER = ["routing", "health", "quota", "budget", "ratelimit",
+    "observability", "nodes", "catalog", "client", "pricing", "services"];
+  const groupOrder = useMemo(() => {
+    const inCore = Object.keys(groups).filter(g => CORE_ORDER.includes(g))
+      .sort((a, b) => CORE_ORDER.indexOf(a) - CORE_ORDER.indexOf(b));
+    const rest = Object.keys(groups).filter(g => !CORE_ORDER.includes(g)).sort();
+    return [...inCore, ...rest];
+  }, [groups]);
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+  // Search = expand semua grup yang match, biar hasil gak tersembunyi collapse.
+  useEffect(() => {
+    if (q) setOpenGroups(Object.fromEntries(groupOrder.map(g => [g, !!groups[g]?.length])));
+  }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function groupLabel(g: string): string {
+    const key = `settings.group.${g}`;
+    const label = t(key);
+    // t() jatuh ke kunci mentah kalau belum ada labelnya -- untuk grup
+    // provider baru pakai id-nya langsung, tetap terbaca manusia.
+    return label === key ? g : label;
+  }
+
   const pending = useMemo(() => {
     if (!doc) return [];
     return Object.keys(draft).filter(k => {
@@ -70,35 +105,56 @@ export function SettingsView({ refreshKey }: { refreshKey: number }) {
       <InlineMsg msg={err} kind="err" />
       <InlineMsg msg={ok} kind="ok" />
       {pending.length > 0 && <p className="tiny muted">{fmt("settings.pending", { value: pending.length })}</p>}
-      <table>
-        <thead><tr>
-          <th>{t("settings.col_key")}</th><th>{t("settings.col_value")}</th>
-          <th>{t("settings.col_default")}</th><th>{t("settings.col_type")}</th><th>{t("settings.col_note")}</th>
-        </tr></thead>
-        <tbody>
-          {keys.map(k => {
-            const schema = doc!.schema[k];
-            const changed = pending.includes(k);
-            return (
-              <tr key={k} className={changed ? "row-changed" : undefined}>
-                <td className="mono tiny">{k}</td>
-                <td>
-                  <input
-                    className="tiny-input mono"
-                    value={draft[k] ?? JSON.stringify(doc!.values[k] ?? schema.default)}
-                    onChange={e => setDraft({ ...draft, [k]: e.target.value })}
-                    aria-label={k}
-                  />
-                </td>
-                <td className="tiny muted mono">{JSON.stringify(schema.default)}</td>
-                <td className="tiny">{schema.type}</td>
-                <td className="tiny muted">{schema.doc || fmt("settings.doc", { value: k })}</td>
-              </tr>
-            );
-          })}
-          {!keys.length && <tr><td colSpan={5}><p className="muted tiny">{t("settings.no_match")}</p></td></tr>}
-        </tbody>
-      </table>
+      {!keys.length && <p className="muted tiny">{t("settings.no_match")}</p>}
+      {groupOrder.map(g => {
+        const rows = groups[g] || [];
+        if (!rows.length) return null;
+        const open = !!openGroups[g] || !!q;
+        const pendingHere = rows.filter(k => pending.includes(k)).length;
+        return (
+          <div key={g} className={"settings-group" + (open ? " open" : "")}>
+            <header
+              className="settings-group-head"
+              onClick={() => setOpenGroups(v => ({ ...v, [g]: !open }))}
+            >
+              <span className="brand-caret">{open ? "▾" : "▸"}</span>
+              <span className="settings-group-name">{groupLabel(g)}</span>
+              <span className="badge" title={t("settings.col_key")}>{rows.length}</span>
+              {pendingHere > 0 && <span className="badge warn">{fmt("settings.pending", { value: pendingHere })}</span>}
+            </header>
+            {open && (
+              <table>
+                <thead><tr>
+                  <th>{t("settings.col_key")}</th><th>{t("settings.col_value")}</th>
+                  <th>{t("settings.col_default")}</th><th>{t("settings.col_type")}</th><th>{t("settings.col_note")}</th>
+                </tr></thead>
+                <tbody>
+                  {rows.map(k => {
+                    const schema = doc!.schema[k];
+                    const changed = pending.includes(k);
+                    return (
+                      <tr key={k} className={changed ? "row-changed" : undefined}>
+                        <td className="mono tiny">{k}</td>
+                        <td>
+                          <input
+                            className="tiny-input mono"
+                            value={draft[k] ?? JSON.stringify(doc!.values[k] ?? schema.default)}
+                            onChange={e => setDraft({ ...draft, [k]: e.target.value })}
+                            aria-label={k}
+                          />
+                        </td>
+                        <td className="tiny muted mono">{JSON.stringify(schema.default)}</td>
+                        <td className="tiny">{schema.type}</td>
+                        <td className="tiny muted">{schema.doc || fmt("settings.doc", { value: k })}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        );
+      })}
     </Card>
   );
 }

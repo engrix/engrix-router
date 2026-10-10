@@ -9,9 +9,9 @@ import { fmt, t } from "./i18n";
 import { dcount, num, pct1, pctBand, short } from "./format";
 import type { QuotaReading } from "./types";
 
-export function Card(props: { title: ReactNode; tools?: ReactNode; children: ReactNode; tone?: "danger" }) {
+export function Card(props: { title: ReactNode; tools?: ReactNode; children: ReactNode; tone?: "danger"; inner?: boolean }) {
   return (
-    <section className={"card" + (props.tone === "danger" ? " card-danger" : "")}>
+    <section className={"card" + (props.tone === "danger" ? " card-danger" : "") + (props.inner ? " prov-card" : "")}>
       <header className="card-head">
         <h3>{props.title}</h3>
         {props.tools && <div className="row tight">{props.tools}</div>}

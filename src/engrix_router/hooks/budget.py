@@ -43,6 +43,11 @@ class Reservation:
     scopes: list[str]
     tokens: int
     requests: int
+    # # Periode (UTC day) saat reserve terjadi. Settle HARUS mengembalikan
+    # # delta ke periode yang sama, bukan periode "sekarang": reserve jam 23:59
+    # # lalu stream selesai jam 00:01 -> tanpa ini hari-D+1 yang di-kurangi
+    # # (salah hari) dan hari-D tetap over-charge permanen (audit TASK-45 #6).
+    period_key: str = ""
 
     def release_tokens(self) -> int:
         return self.tokens
@@ -103,18 +108,22 @@ def reserve(*, provider: str, api_key_id: str | None, est_tokens: int,
                 " updated_at = ? WHERE period_key = ? AND scope = ?",
                 (tokens, now_ms(), date_key_utc(), scope))
     return Reservation(scopes=build_scopes(provider=provider, api_key_id=api_key_id, lane=lane),
-                       tokens=tokens, requests=1)
+                       tokens=tokens, requests=1, period_key=date_key_utc())
 
 
 def settle(reservation: Reservation, actual_tokens: int) -> None:
     """Correct the bucket once real usage is known. The delta may be negative."""
+    # # Settle selalu menulis ke periode reserve, bukan periode "sekarang":
+    # # delta lintas tengah malam UTC harus kembali ke hari yang sama dengan
+    # # tempat charge-nya terjadi (audit TASK-45 #6).
     delta = int(actual_tokens) - reservation.tokens
     if delta == 0:
         return
+    period = reservation.period_key or date_key_utc()
     for scope in reservation.scopes:
-        ensure_bucket(scope)
+        ensure_bucket(scope, period=period)
         execute("UPDATE budgets SET used_tokens = MAX(0, used_tokens + ?), updated_at = ?"
-                " WHERE period_key = ? AND scope = ?", (delta, now_ms(), date_key_utc(), scope))
+                " WHERE period_key = ? AND scope = ?", (delta, now_ms(), period, scope))
 
 
 def snapshot() -> dict[str, Any]:

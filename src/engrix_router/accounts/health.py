@@ -92,7 +92,25 @@ def is_available(connection_id: str, model: str, *, ts: int | None = None) -> bo
     moment = now_ms() if ts is None else ts
     health = get(connection_id)
     if health["test_status"] in BLOCKING_STATUSES:
-        return False
+        # # Self-heal (audit TASK-45 #2): unavailable itu status NON-permanen
+        # # -- dibarengi lock berwaktu. Kalau lock '*' sudah expired dan
+        # # rate-limit juga sudah lewat, status boleh pulang sendiri ke
+        # # cooling; kalau tidak, satu error quota_daily jam 14:00 bikin
+        # # akun mati selamanya sampai admin re-test manual.
+        if health["test_status"] == STATUS_UNAVAILABLE:
+            heal = get_bool("health.self_heal_unavailable")
+            rate_ok = not (health["rate_limited_until"] and health["rate_limited_until"] > moment)
+            if heal and rate_ok and not _locks_of(connection_id, ACCOUNT_WILDCARD, moment):
+                execute(
+                    "UPDATE connection_health SET test_status=?, updated_at=? WHERE connection_id=?",
+                    (STATUS_COOLING, moment, connection_id),
+                )
+                applog.info("health", f"self-heal {connection_id}: unavailable -> cooling, all locks expired")
+                health["test_status"] = STATUS_COOLING
+            else:
+                return False
+        else:
+            return False
     limited_until = health["rate_limited_until"]
     if limited_until and limited_until > moment:
         return False

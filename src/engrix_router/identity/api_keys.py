@@ -21,7 +21,10 @@ from engrix_router.core import logs as applog
 from engrix_router.core.ids import new_id
 
 KEY_PREFIX_LEN = 12
-_LABEL = "egk-live-"
+# Prefix dibuat supaya mata langsung kenali "ini API key gateway" (gaya
+# sk-OpenAI/9router), bukan sandi internal. Key lama berlabel 'egk-live-'
+# tetap valid: verifikasi pakai hash penuh, prefix cuma buat pencarian.
+_LABEL = "sk-er-"
 
 
 def _hash(secret: str) -> str:

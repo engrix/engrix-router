@@ -11,9 +11,7 @@ import { RequestsView } from "./view_requests";
 import { KeysView, NodesView, ProxyView } from "./view_connect";
 import { LogsView, SettingsView } from "./view_system";
 
-type ViewId = "overview" | "requests" | "logs" | "providers" | "nodes" | "keys" | "proxy" | "settings";
-
-interface NavGroup { label: string; items: { id: ViewId; label: string }[] }
+type ViewId = "overview" | "requests" | "logs" | "providers" | "nodes" | "keys" | "proxy" | "settings";interface NavGroup { label: string; items: { id: ViewId; label: string }[] }
 
 // Navigasi dikelompokkan berdasarkan maksud (Monitor / Connect / System):
 // dulu 8 tab datar, operator bingung "mana connection mana quota".
@@ -80,9 +78,24 @@ export default function App() {
     return () => window.removeEventListener("engrix:api-status", onErr);
   }, []);
 
+  // Brand yang sedang difokus (TASK-46): klik merek di list providers ->
+  // halaman merek itu sendiri (#providers/<brand>), bukan accordion di
+  // satu halaman panjang. Nol fokus = list merek.
+  const [focusBrand, setFocusBrand] = useState<string>(() => {
+    const h = window.location.hash.replace("#", "");
+    return h.startsWith("providers/") ? decodeURIComponent(h.slice("providers/".length)) : "";
+  });
+
   function show(v: ViewId) {
     setView(v);
+    setFocusBrand("");
     window.location.hash = v;
+  }
+
+  function openBrand(brand: string) {
+    setView("providers");
+    setFocusBrand(brand);
+    window.location.hash = "providers/" + encodeURIComponent(brand);
   }
 
   // Back/forward antar tab = hash berubah tanpa reload; tanpa listener ini
@@ -90,8 +103,14 @@ export default function App() {
   useEffect(() => {
     function onHash() {
       const h = window.location.hash.replace("#", "");
+      if (h.startsWith("providers/")) {
+        setView("providers");
+        setFocusBrand(decodeURIComponent(h.slice("providers/".length)));
+        return;
+      }
       if ((["overview", "requests", "logs", "providers", "nodes", "keys", "proxy", "settings"] as string[]).includes(h)) {
         setView(h as ViewId);
+        setFocusBrand("");
       }
     }
     window.addEventListener("hashchange", onHash);
@@ -177,7 +196,7 @@ export default function App() {
         </div>
 
         {view === "overview" && <OverviewView refreshKey={refreshKey} />}
-        {view === "providers" && <ProvidersView />}
+        {view === "providers" && <ProvidersView focusBrand={focusBrand} onOpenBrand={openBrand} onBack={() => show("providers")} />}
         {view === "requests" && <RequestsView refreshKey={refreshKey} />}
         {view === "nodes" && <NodesView refreshKey={refreshKey} />}
         {view === "keys" && <KeysView refreshKey={refreshKey} />}

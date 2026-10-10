@@ -303,3 +303,17 @@ html[data-theme="light"] img.theme-dark { display: none; }
   .qrow { grid-template-columns: 1fr; gap: 3px; }
   .acct-actions { margin-left: 0; }
 }
+
+/* ── TASK-45: brand accordion + rak settings ── */
+.card.brand { padding: 0; }
+.brand-head { cursor: pointer; user-select: none; padding: 12px 14px; }
+.brand-head:hover { background: var(--bg-soft); }
+.brand-caret { color: var(--text-faint); margin-right: 6px; font-size: 12px; }
+.card.brand .prov-card { border-top: 1px solid var(--border); border-radius: 0; box-shadow: none; margin: 0; }
+.prov-models { margin: 2px 0 8px; }
+.settings-group { border: 1px solid var(--border); border-radius: 8px; margin: 10px 0; overflow: hidden; }
+.settings-group-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer; user-select: none; background: var(--bg-soft); }
+.settings-group-head:hover { filter: brightness(1.06); }
+.settings-group-name { font-weight: 600; font-size: 13px; }
+.settings-group table { margin: 0; }
+.settings-group thead th { background: transparent; }

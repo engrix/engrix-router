@@ -32,7 +32,11 @@ DERIVED_KEYS = frozenset({
 @router.get("/settings", dependencies=[Depends(deps.require_admin)])
 async def get_settings() -> dict[str, Any]:
     values = settings.all_settings()
-    docs = {key: {"default": default, "type": typ.__name__, "doc": doc}
+    docs = {key: {"default": default, "type": typ.__name__, "doc": doc,
+                  # grup = segmen pertama nama kunci (budget.*, health.*);
+                  # knob provider pakai id provider-nya sendiri sebagai grup
+                  # (register_defaults mewajibkan prefix owner.)
+                  "group": key.split(".", 1)[0]}
             for key, (default, typ, doc) in settings.DEFAULTS.items()}
     return {"values": values, "schema": docs}
 

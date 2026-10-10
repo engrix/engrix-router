@@ -77,7 +77,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Engrix Router", version=config.VERSION, lifespan=lifespan,
-                  docs_url="/api/docs", redoc_url=None)
+                  docs_url=None, redoc_url=None, openapi_url=None)
     if config.CORS_ALLOW_ORIGINS:
         app.add_middleware(
             CORSMiddleware, allow_origins=config.CORS_ALLOW_ORIGINS, allow_credentials=False,

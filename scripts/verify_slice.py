@@ -119,7 +119,7 @@ with client:
     # 3) buat klien key + pastikan value cuma keluar sekali
     r = client.post("/api/keys", json={"name": "verify-client"}, headers=ADMIN)
     created = r.json()
-    check("key_created", r.status_code == 201 and created.get("key", "").startswith("egk-live-"), created)
+    check("key_created", r.status_code == 201 and created.get("key", "").startswith("sk-er-"), created)
     r = client.get("/api/keys", headers=ADMIN)
     listed = r.json()
     check("key_never_returned_in_list",

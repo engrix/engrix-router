@@ -79,9 +79,11 @@ async def require_admin(
         sent = authorization[7:].strip()
     elif x_admin_token:
         sent = x_admin_token.strip()
-    elif request.query_params.get("admin_token"):
-        sent = request.query_params["admin_token"]
-    if not sent or sent != config.ADMIN_TOKEN:
+    # # Query-param admin token dihapus (audit TASK-45 #9): token di URL
+    # # mendarat di access log, history browser, dan Referer header.
+    # # Bandingkan constant-time supaya timing tidak bocor panjang token.
+    import secrets as _secrets
+    if not sent or not _secrets.compare_digest(sent, config.ADMIN_TOKEN):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail=errors.client_error_body(errors.CLASS_CLIENT_BAD_KEY,
                                                             "admin token is incorrect"))

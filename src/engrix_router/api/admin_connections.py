@@ -28,9 +28,23 @@ async def list_providers() -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for definition in registry.definitions():
         rows = connections.list_for_provider(definition.id, include_health=False)
+        # Model yang ditampilkan = deklarasi adapter; kalau vendor-nya dinamis
+        # (qoder: katalog dari API), pakai cache provider_catalog yang sudah
+        # pernah di-fetch — tanpa manggil vendor baru di halaman ini.
+        named = [{"id": m.id, "name": m.name} for m in definition.models]
+        if not named:
+            seen: set[str] = set()
+            for row in rows:
+                for spec in catalog.cached(definition.id, row["id"]) or []:
+                    if spec.id not in seen:
+                        seen.add(spec.id)
+                        named.append({"id": spec.id, "name": spec.name or spec.id})
         out.append({
             "id": definition.id,
             "display_name": definition.display_name or definition.id,
+            # brand = merek induk buat nesting dashboard; varian satu merek
+            # (qoder intl/CN, zcode start/coding) numpuk di bawahnya.
+            "brand": definition.brand or definition.display_name or definition.id,
             "category": definition.category,
             "prefixes": list(definition.prefixes),
             "base_url": definition.transport.base_url,
@@ -43,6 +57,10 @@ async def list_providers() -> list[dict[str, Any]]:
             "oauth": (hasattr(registry.get_provider(definition.id), "oauth_start")),
             "has_usage": definition.transport.usage is not None,
             "models_declared": [model.id for model in definition.models],
+            # nama manusia per model -- deklarasi adapter, atau cache katalog
+            # kalau vendor-nya dinamis; UI menampilkan daftar ini tanpa
+            # harus manggil vendor (GET catalog per akun tetap tersedia).
+            "models_named": named,
             "connections": len(rows),
             "active_connections": sum(1 for row in rows if row["is_active"]),
             "is_node": "node" in definition.features,

@@ -188,6 +188,7 @@ async def _dispatch(
     provider = registry.get_provider(definition.id)
     excluded: set[str] = set()
     attempts = 0
+    concurrency_retries = 0
     max_attempts = max(1, settings.get_int("routing.max_connections_per_request"))
     deadline = time.monotonic() + config.UPSTREAM_TOTAL_TIMEOUT_S
     usage_acc: dict[str, Any] = {}
@@ -217,12 +218,26 @@ async def _dispatch(
         selector.mark_selected(chosen, sticky=plan["strategy"] == selector.STRATEGY_ROUND_ROBIN)
         reservation = budget.reserve(provider=definition.id, api_key_id=api_key_id,
                                      est_tokens=estimate_prompt_tokens(payload))
+        # # Benteng reserve->settle (audit TASK-45 #1): asyncio.CancelledError
+        # # itu BaseException (Python 3.8+), BUKAN Exception -- dulu semua
+        # # settle() cuma dipanggil di dalam `except Exception`, jadi client
+        # # yang cabut di tengah streaming ninggalin reservation (est +
+        # # headroom 8192) nanggung di 4 bucket sampai ganti hari UTC, dan
+        # # trace gak pernah finish. finally menjamin settle selalu jalan.
+        settled = False
+
+        def _settle_now(actual_tokens: int) -> None:
+            nonlocal settled
+            if not settled:
+                settled = True
+                budget.settle(reservation, actual_tokens)
+
         attempts += 1
         if config.DRY_RUN:
             # Dry-run: payload udah dibangun + ke-trace, upstream gak pernah disentuh.
             # Ini jalur buat nge-diff request kita vs vendor tanpa bakar kuota.
             trace.dry_run = True
-            budget.settle(reservation, 0)
+            _settle_now(0)
             trace.stage(trace_mod.STEP_DRY_RUN, {"upstream_called": False,
                                                  "reason": "EROUTER_DRY_RUN",
                                                  "url": request.url}, direction="out")
@@ -236,6 +251,7 @@ async def _dispatch(
             return
         got_first = False
         failure: Any = None
+
         try:
             if stream:
                 async for chunk in provider.open_stream(request):
@@ -273,9 +289,16 @@ async def _dispatch(
                                  reasoning_chars=_delta_reasoning_len(chunk0))
                 yield _completion_as_chunk(response, model=str(payload.get("model") or model))
             trace.attach_usage(usage_acc, signals=signals_acc)
-            budget.settle(reservation, int(usage_acc.get("total") or 0))
+            _settle_now(int(usage_acc.get("total") or 0))
             health.register_success(chosen.credentials.connection_id)
             return
+        except asyncio.CancelledError:
+            # # Client cabut di tengah jalan: token yang udah kecatat dari
+            # # stream parsial tetap di-attach (kalau ada) lalu reservation
+            # # dikembalikan via finally -- bukan bocor sampai ganti hari.
+            if usage_acc:
+                trace.attach_usage(usage_acc, signals=signals_acc)
+            raise
         except UpstreamError as exc:
             failure = exc
             classified = errors.classify(status=exc.status, text=str(exc), vendor_code=exc.vendor_code,
@@ -294,6 +317,14 @@ async def _dispatch(
                     f"{exc.__class__.__name__}: {exc}"[:400],
                 )
 
+        # # Benteng kedua (audit TASK-45 #1): apapun jalur keluarnya --
+        # # sukses (return di atas), error (kecuali CancelledError),
+        # # atau client cabut (CancelledError diteruskan) -- reservation
+        # # WAJIB di-settle sebelum attempt ini berakhir. Tanpa ini retry
+        # # dari client flaky bisa nguras daily budget tanpa membakar token.
+        finally:
+            _settle_now(0)
+
         decision = health.register_error(chosen.credentials.connection_id, model, classified)
         applog.request_failed(
             rid=trace.request_id, provider=definition.id, model=model,
@@ -303,7 +334,23 @@ async def _dispatch(
             lock_ms=decision.get("lock_ms"),
             retry_after_s=classified.retry_after_effective(settings.get_int("client.retry_after_default_s")),
         )
-        budget.settle(reservation, 0)
+        # # Settle di sini (bukan setelah blok except) supaya finally cuma
+        # # menangani jalur cancel. _settle_now idempotent.
+        _settle_now(0)
+
+        # Slot paralel model penuh (ZCode 3009): ini bukan akun sakit, cuma
+        # antrian 1-detik-lamanya vendor. Kasih jatah retry cepat max 3x,
+        # tunggu lock model expire, jangan exclude koneksi yang sehat.
+        if (classified.error_class == errors.CLASS_MODEL_CONCURRENCY
+                and not got_first
+                and concurrency_retries < 3
+                and time.monotonic() < deadline - 4):
+            concurrency_retries += 1
+            wait_s = min(3.0, float(classified.retry_after_effective(
+                settings.get_int("client.retry_after_default_s")) or 3))
+            await asyncio.sleep(wait_s)
+            continue
+
         excluded.add(chosen.credentials.connection_id)
 
         stop_reason = None

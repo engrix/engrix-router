@@ -15,12 +15,17 @@ import type {
   CatalogRow, Connection, Health, ModelTestRow, PoolRow, ProviderDef, QuotaSnapshot,
 } from "./types";
 
-type Panel = { kind: "catalog"; title: string; body: React.ReactNode }
-  | { kind: "oauth"; url: string; status: string; done: boolean }
-  | { kind: "models"; title: string; rows: ModelTestRow[] }
+type Panel = { kind: "catalog"; brand: string; title: string; body: React.ReactNode }
+  | { kind: "oauth"; brand: string; url: string; status: string; done: boolean }
+  | { kind: "models"; brand: string; title: string; rows: ModelTestRow[] }
   | null;
 
-export function ProvidersView() {
+export function ProvidersView(props: {
+  focusBrand?: string;
+  onOpenBrand: (brand: string) => void;
+  onBack: () => void;
+}) {
+  const focus = props.focusBrand || "";
   const [providers, setProviders] = useState<ProviderDef[]>([]);
   const [conns, setConns] = useState<Connection[]>([]);
   const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
@@ -53,11 +58,11 @@ export function ProvidersView() {
   // menggambar ulang kartu begitu akun mendarat (sama seperti perilaku lama).
   async function oauthStart(p: ProviderDef) {
     if (pollRef.current) clearInterval(pollRef.current);
-    setPanel({ kind: "oauth", url: "", status: t("conn.oauth_starting"), done: false });
+    setPanel({ kind: "oauth", brand: p.brand || p.display_name || p.id, url: "", status: t("conn.oauth_starting"), done: false });
     try {
       const started = await api<{ authorize_url: string; session_id: string; poll_interval_sec: number }>(
         `/api/oauth/${encodeURIComponent(p.id)}/start`, { method: "POST" });
-      setPanel({ kind: "oauth", url: started.authorize_url, status: t("conn.oauth_waiting"), done: false });
+      setPanel({ kind: "oauth", brand: p.brand || p.display_name || p.id, url: started.authorize_url, status: t("conn.oauth_waiting"), done: false });
       pollRef.current = window.setInterval(async () => {
         let step: { status: string; connection_id?: string };
         try {
@@ -69,20 +74,21 @@ export function ProvidersView() {
         if (step.status === "pending") return;
         if (pollRef.current) clearInterval(pollRef.current);
         if (step.status === "ready") {
-          setPanel({ kind: "oauth", url: started.authorize_url,
+          setPanel({ kind: "oauth", brand: p.brand || p.display_name || p.id, url: started.authorize_url,
             status: fmt("conn.oauth_linked", { id: short(step.connection_id || "") }), done: true });
           reload();
         } else {
-          setPanel({ kind: "oauth", url: started.authorize_url, status: t("conn.oauth_failed"), done: true });
+          setPanel({ kind: "oauth", brand: p.brand || p.display_name || p.id, url: started.authorize_url, status: t("conn.oauth_failed"), done: true });
         }
       }, Math.max(2, started.poll_interval_sec || 5) * 1000);
     } catch (e) {
-      setPanel({ kind: "oauth", url: "", status: t("conn.oauth_failed") + " — " + (e as Error).message, done: true });
+      setPanel({ kind: "oauth", brand: p.brand || p.display_name || p.id, url: "", status: t("conn.oauth_failed") + " — " + (e as Error).message, done: true });
     }
   }
 
   async function showCatalog(c: Connection) {
-    setPanel({ kind: "catalog", title: fmt("conn.catalog_title", { value: short(c.id) }), body: t("ui.busy") });
+    const brand = brandOf(c.provider);
+    setPanel({ kind: "catalog", brand, title: fmt("conn.catalog_title", { value: short(c.id) }), body: t("ui.busy") });
     try {
       // Katalog dibaca paksa (?force=true) di sini memang sengaja: tab ini
       // tempat kita mengecek apakah vendor masih cocok dengan mirror lokal.
@@ -109,23 +115,24 @@ export function ProvidersView() {
           </table>
         )
         : <p className="tiny err-text">{r.error || t("common.failed")}</p>;
-      setPanel({ kind: "catalog", title: fmt("conn.catalog_title", { value: short(c.id) }), body });
+      setPanel({ kind: "catalog", brand, title: fmt("conn.catalog_title", { value: short(c.id) }), body });
     } catch (e) {
-      setPanel({ kind: "catalog", title: fmt("conn.catalog_title", { value: short(c.id) }),
+      setPanel({ kind: "catalog", brand, title: fmt("conn.catalog_title", { value: short(c.id) }),
         body: <p className="tiny err-text">{(e as ApiError).message}</p> });
     }
   }
 
   async function testModels(c: Connection) {
     if (!window.confirm(t("conn.test_models_confirm"))) return;
-    setPanel({ kind: "models", title: fmt("conn.test_models_title", { value: short(c.id) }), rows: [] });
+    const brand = brandOf(c.provider);
+    setPanel({ kind: "models", brand, title: fmt("conn.test_models_title", { value: short(c.id) }), rows: [] });
     try {
       const r = await api<{ results: ModelTestRow[] }>(
         `/api/connections/${c.id}/test_models`,
         { method: "POST", body: JSON.stringify({ allow_spend: true, max_models: 2 }) });
-      setPanel({ kind: "models", title: fmt("conn.test_models_title", { value: short(c.id) }), rows: r.results || [] });
+      setPanel({ kind: "models", brand, title: fmt("conn.test_models_title", { value: short(c.id) }), rows: r.results || [] });
     } catch (e) {
-      setPanel({ kind: "models", title: fmt("conn.test_models_title", { value: short(c.id) }),
+      setPanel({ kind: "models", brand, title: fmt("conn.test_models_title", { value: short(c.id) }),
         rows: [{ model: "—", ok: false, latency_ms: null, error_class: (e as ApiError).message }] });
     }
   }
@@ -135,58 +142,127 @@ export function ProvidersView() {
   const byProv: Record<string, Connection[]> = {};
   conns.forEach(c => { (byProv[c.provider] = byProv[c.provider] || []).push(c); });
 
+  // Brand grouping (TASK-45/46): dashboard diurut PER MEREK. List = satu
+  // baris per merek; klik buka halaman merek itu (route providers/<brand>).
+  // Alasan skala: 1 merek bisa punya banyak varian (Qoder intl + CN, ZCode
+  // start + coding) dan ribuan akun; satu halaman flat = scroll muntah.
+  const brandMap: Record<string, ProviderDef[]> = {};
+  providers.forEach(p => {
+    const b = p.brand || p.display_name || p.id;
+    (brandMap[b] = brandMap[b] || []).push(p);
+  });
+  const brandOf = (providerId: string): string => {
+    const p = providers.find(x => x.id === providerId);
+    return p ? (p.brand || p.display_name || p.id) : providerId;
+  };
+
   return (
     <div>
+      {/* Breadcrumb dua aras (TASK-46): list merek -> halaman satu merek.
+          Kalau fokus aktif, hanya varian merek itu yang dirender + tombol
+          kembali; kalau tidak, list merek ringkas (satu baris per merek). */}
+      {focus && (
+        <div className="row sec-tools">
+          <button className="tight" onClick={props.onBack}>← {t("nav.providers")}</button>
+          <h2 className="crumb">{focus}</h2>
+        </div>
+      )}
       <div className="row sec-tools">
         <button className="tight" onClick={() => reload(true)} disabled={!token()}>{t("conn.refresh_quota")}</button>
         <InlineMsg msg={err} kind="err" />
       </div>
 
-      {providers.map(p => (
-        <ProviderCard
-          key={p.id} def={p} accounts={byProv[p.id] || []} pools={pools}
-          readings={qByConn} onOauth={() => oauthStart(p)} onCatalog={showCatalog}
-          onTestModels={testModels} onReload={() => reload()}
-        />
-      ))}
+      {Object.entries(brandMap).sort((a, b) => a[0].localeCompare(b[0])).map(([brand, defs]) => {
+        const isFocus = focus === brand;
+        if (focus && !isFocus) return null;
+        const acctCount = defs.reduce((n, d) => n + (byProv[d.id] || []).length, 0);
+        const models = new Set(defs.flatMap(d => d.models_named.map(m => m.name || m.id)));
+        // Mode list: satu baris ringkas per merek, klik untuk buka halaman
+        // merek -- bukan accordion yang memanjang di satu halaman.
+        if (!focus) {
+          return (
+            <section key={brand} className="card brand">
+              <header className="card-head brand-head" onClick={() => props.onOpenBrand(brand)}>
+                <h3><span className="brand-caret">▸</span> {brand}</h3>
+                <div className="row tight">
+                  <span className="badge" title={t("providers.variants")} aria-label="variants">{defs.length}</span>
+                  <span className="badge violet" title={t("providers.accounts")} aria-label="accounts">{acctCount}</span>
+                  {models.size > 0 && <span className="badge info" title={t("providers.models_known")} aria-label="models">{models.size}</span>}
+                </div>
+              </header>
+            </section>
+          );
+        }
+        return (
+          <section key={brand} className="card brand open">
+            <header className="card-head">
+              <h3>{brand}</h3>
+              <div className="row tight">
+                <span className="badge" title={t("providers.variants")} aria-label="variants">{defs.length}</span>
+                <span className="badge violet" title={t("providers.accounts")} aria-label="accounts">{acctCount}</span>
+                {models.size > 0 && <span className="badge info" title={t("providers.models_known")} aria-label="models">{models.size}</span>}
+              </div>
+            </header>
+            {defs.map(p => (
+              <ProviderCard
+                key={p.id} def={p} accounts={byProv[p.id] || []} pools={pools}
+                readings={qByConn} onOauth={() => oauthStart(p)} onCatalog={showCatalog}
+                onTestModels={testModels} onReload={() => reload()}
+              />
+            ))}
+            {panel && panel.brand === brand && (
+              <PanelBox panel={panel} />
+            )}
+          </section>
+        );
+      })}
+      {!providers.length && <EmptyState label={t("common.empty")} />}
 
-      {panel && (
-        <Card title={panel.kind === "catalog" ? panel.title : panel.kind === "models" ? panel.title : t("conn.oauth_add")}>
-          {panel.kind === "oauth" && (
-            <div>
-              {panel.url && (
-                <p className="tiny">
-                  <a href={panel.url} target="_blank" rel="noreferrer">{panel.url}</a>
-                  {" "}<button className="tiny" onClick={() => { navigator.clipboard?.writeText(panel.url || ""); }}>{t("common.copy")}</button>
-                </p>
-              )}
-              <p className="tiny muted">{panel.status}{!panel.done && panel.url ? "" : ""}</p>
-            </div>
-          )}
-          {panel.kind === "catalog" && panel.body}
-          {panel.kind === "models" && (
-            <table>
-              <thead><tr>
-                <th>{t("common.model")}</th><th>{t("common.col_result")}</th><th>{t("conn.col_latency")}</th><th>{t("common.error")}</th>
-              </tr></thead>
-              <tbody>
-                {panel.rows.map(x => (
-                  <tr key={x.model}>
-                    <td className="mono tiny">{x.model}</td>
-                    <td><Badge status={x.ok ? "ok" : "upstream_error"} /></td>
-                    <td className="tiny">{num(x.latency_ms)} ms</td>
-                    <td className="tiny mono">{x.error_class || ""}</td>
-                  </tr>
-                ))}
-                {!panel.rows.length && <EmptyState label={t("ui.busy")} colSpan={4} />}
-              </tbody>
-            </table>
-          )}
-        </Card>
-      )}
-
-      <AddManualCard providers={providers} pools={pools} onCreated={() => reload()} />
+      {!focus && <AddManualCard providers={providers} pools={pools} onCreated={() => reload()} />}
     </div>
+  );
+}
+
+// Kotak hasil (katalog / tes model / OAuth+) -- dipindah ke dalam merek
+// pemiliknya supaya konteks tidak tercerai (dulu nyangkut di bawah semua kartu).
+function PanelBox(props: { panel: NonNullable<Panel> }) {
+  const panel = props.panel;
+  return (
+    <Card
+      inner
+      title={panel.kind === "catalog" ? panel.title : panel.kind === "models" ? panel.title : t("conn.oauth_add")}
+    >
+      {panel.kind === "oauth" && (
+        <div>
+          {panel.url && (
+            <p className="tiny">
+              <a href={panel.url} target="_blank" rel="noreferrer">{panel.url}</a>
+              {" "}<button className="tiny" onClick={() => { navigator.clipboard?.writeText(panel.url || ""); }}>{t("common.copy")}</button>
+            </p>
+          )}
+          <p className="tiny muted">{panel.status}</p>
+        </div>
+      )}
+      {panel.kind === "catalog" && panel.body}
+      {panel.kind === "models" && (
+        <table>
+          <thead><tr>
+            <th>{t("common.model")}</th><th>{t("common.col_result")}</th><th>{t("conn.col_latency")}</th><th>{t("common.error")}</th>
+          </tr></thead>
+          <tbody>
+            {panel.rows.map(x => (
+              <tr key={x.model}>
+                <td className="mono tiny">{x.model}</td>
+                <td><Badge status={x.ok ? "ok" : "upstream_error"} /></td>
+                <td className="tiny">{num(x.latency_ms)} ms</td>
+                <td className="tiny mono">{x.error_class || ""}</td>
+              </tr>
+            ))}
+            {!panel.rows.length && <EmptyState label={t("ui.busy")} colSpan={4} />}
+          </tbody>
+        </table>
+      )}
+    </Card>
   );
 }
 
@@ -204,6 +280,7 @@ function ProviderCard(props: {
   const [oauthBusy, setOauthBusy] = useState(false);
   return (
     <Card
+      inner
       title={<span>{p.display_name || p.id}{p.display_name && !p.display_name.toLowerCase().includes(p.id) ? <> <span className="mono muted tiny">{p.id}</span></> : null}</span>}
       tools={p.oauth ? (
         <button
@@ -220,6 +297,17 @@ function ProviderCard(props: {
         {p.is_node && <span className="badge info" title={t("providers.node_note")}>{t("conn.node_badge")}</span>}
         {p.has_usage && <span className="badge violet">{t("providers.usage_badge")}</span>}
       </div>
+
+      {/* Daftar model dikenal (deklarasi adapter; tanpa manggil vendor),
+          supaya user tahu model apa saja yang bisa diminta ke varian ini. */}
+      {p.models_named.length > 0 && (
+        <div className="row tight prov-models">
+          <span className="tiny muted">{t("providers.models_known")}:</span>
+          {p.models_named.map(m => (
+            <span key={m.id} className="badge" title={m.id}>{m.name || m.id}</span>
+          ))}
+        </div>
+      )}
 
       {!props.accounts.length && <EmptyState label={t("conn.no_accounts")} />}
 

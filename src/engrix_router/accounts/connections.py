@@ -240,7 +240,7 @@ def candidates(definition: ProviderDef, model: str, *, exclude: set[str] | None 
             reason = health.locked_reason(connection_id, model, ts=ts) or {}
             skipped.append({
                 "connection_id": connection_id,
-                "reason": f"locked/{'status'} -> {reason.get('reason', 'unhealthy')}",
+                "reason": f"locked/{reason.get('reason', 'unhealthy')}",
                 "until_ms": reason.get("locked_until"),
             })
             continue

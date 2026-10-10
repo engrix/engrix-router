@@ -164,12 +164,13 @@ def test_api_key_disimpan_sebagai_hash():
     from engrix_router.identity import api_keys
 
     created = api_keys.create_key("engrix-agent")
-    assert created["key"].startswith("egk-live-")
+    assert created["key"].startswith("sk-er-")
     rows = query("SELECT key_hash, key_prefix FROM api_keys")
     assert created["key"] not in [r["key_hash"] for r in rows]
     assert all(len(r["key_hash"]) == 64 for r in rows)
     assert api_keys.verify(created["key"])["name"] == "engrix-agent"
-    assert api_keys.verify("egk-live-palsu") is None
+    assert api_keys.verify("sk-er-palsu") is None
+    # key lama tetap dikenali walau label diganti: verifikasi pakai hash penuh
 
 
 def test_extract_client_key_ikut_urutan_9router():

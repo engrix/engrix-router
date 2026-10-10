@@ -5,6 +5,7 @@
 export interface ProviderDef {
   id: string;
   display_name: string;
+  brand: string;
   category: string;
   prefixes: string[];
   base_url: string;
@@ -14,6 +15,7 @@ export interface ProviderDef {
   oauth: boolean;
   has_usage: boolean;
   models_declared: string[];
+  models_named: { id: string; name: string }[];
   connections: number;
   active_connections: number;
   is_node: boolean;
@@ -232,7 +234,7 @@ export interface PoolRow {
 
 export interface SettingsDoc {
   values: Record<string, unknown>;
-  schema: Record<string, { default: unknown; type: string; doc: string }>;
+  schema: Record<string, { default: unknown; type: string; doc: string; group?: string }>;
 }
 
 export interface LogLine {

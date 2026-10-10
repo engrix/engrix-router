@@ -38,6 +38,7 @@ DEFAULTS: dict[str, tuple[Any, type, str]] = {
     "health.backoff_max_level": (15, int, "cap level backoff"),
     "health.lock_plain_4xx": (False, bool, "400/406 may lock an account? default NO (anti self-DoS guard)"),
     "health.protocol_drift_threshold": (2, int, "how many sig_invalid/replay hits before the gateway freezes every upstream"),
+    "health.self_heal_unavailable": (True, bool, "unavailable may return to cooling on its own once every lock expired"),
     # Status, bukan konfigurasi -- tapi kita persist di tabel settings supaya
     # tripped-nya gak ilang kalau proses restart (9router: cache health di RAM,
     # restart = lupa; lihat antigravityQuota.js:11-31).

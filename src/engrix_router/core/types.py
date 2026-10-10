@@ -133,6 +133,7 @@ class ProviderDef:
     category: str                            # apikey | oauth | none
     transport: TransportSpec
     display_name: str = ""
+    brand: str = ""                          # merek untuk nesting dashboard (mis. "Qoder")
     aliases: tuple[str, ...] = ()            # prefix model, mis. ("qd",)
     auth_modes: tuple[str, ...] = ("apikey",)
     models: tuple[ModelSpec, ...] = ()
