@@ -61,13 +61,20 @@ def _to_native(body: dict[str, Any]) -> dict[str, Any]:
                          "input_schema": (tool.get("function") or {}).get("parameters") or {}}
                         for tool in body["tools"]]
     choice = body.get("tool_choice")
-    if choice == "required":
+    # Dua arah yang harus hidup: klien OpenAI ngirim STRING ("auto"/"none"/
+    # "required"), klien /v1/messages ngirim OBJEK Anthropic apa adanya. String yang
+    # diteruskan tanpa diubah ditolak vendor (400 body.tool_choice: Input should be a
+    # valid dictionary), dan dict yang diuji `in {...}` melempar TypeError: unhashable.
+    if isinstance(choice, dict):
+        if choice.get("function"):
+            out["tool_choice"] = {"type": "tool",
+                                  "tool_name": choice["function"].get("name")}
+        else:
+            out["tool_choice"] = choice
+    elif choice == "required":
         out["tool_choice"] = {"type": "any"}
-    elif isinstance(choice, dict) and choice.get("function"):
-        out["tool_choice"] = {"type": "tool",
-                              "tool_name": choice["function"].get("name")}
-    elif choice in {"auto", "none"}:
-        out["tool_choice"] = choice
+    elif choice in ("auto", "none", "any"):
+        out["tool_choice"] = {"type": choice}
     return out
 
 

@@ -73,6 +73,22 @@ def pick(definition: ProviderDef, model: str, *, exclude: set[str] | None = None
     return chosen, skipped, plan
 
 
+def next_opening_ms(skipped: list[dict[str, Any]], *, ts: int | None = None) -> int | None:
+    """Earliest moment ANY of the locked connections frees up (9router auth.js:114-133).
+
+    Without it a fully-locked provider answers with our generic default Retry-After
+    while the locks still have minutes to run, so a client holding a retry ladder
+    hammers it: measured 2026-10-10, engrix-agent retried 9 times in 31 seconds
+    against `all_locked`. On vendors whose anti-abuse edge flags the CLIENT rather
+    than the request, that hammering is exactly what extends the block.
+
+    """
+    moment = now_ms() if ts is None else ts
+    openings = [int(item["until_ms"]) for item in skipped
+                if item.get("until_ms") and int(item["until_ms"]) > moment]
+    return min(openings) if openings else None
+
+
 def mark_selected(candidate: Candidate, *, sticky: bool) -> None:
     """Record the selection BEFORE sending (not after), like 9router, which writes
     lastUsedAt/consecutiveUseCount at selection time (auth.js:172-192).

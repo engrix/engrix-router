@@ -33,6 +33,8 @@ DEFAULTS: dict[str, tuple[Any, type, str]] = {
     "health.cooldown_auth_ms": (120_000, int, "401/402/403/404 -> how long to lock"),
     "health.cooldown_transient_ms": (30_000, int, "unclassified error: how long to lock"),
     "health.cooldown_short_ms": (5_000, int, "request-not-allowed style"),
+    "health.anti_abuse_cooldown_ms": (120_000, int,
+                                      "anti-abuse rejection (ZCode 3012): how long to lock that model only, account stays usable"),
     "health.backoff_base_ms": (2_000, int, "rate limit: 2^level * base"),
     "health.backoff_max_ms": (300_000, int, "cap backoff rate limit"),
     "health.backoff_max_level": (15, int, "cap level backoff"),

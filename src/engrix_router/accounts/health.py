@@ -181,6 +181,11 @@ def _lock_ms_for(classified: errors.Classified, *, now_ts: int) -> tuple[str, in
     elif policy.lock == "model":
         ttl = int((classified.retry_after_s or 3600) * 1000)
         scope = "model"
+    elif policy.lock == "anti_abuse":
+        # Edge menolak BENTUK body: yang dikunci model itu sebentar, bukan akun
+        # sampai reset kalender (TASK-48). Akun harus tetap boleh dicoba lagi
+        # dengan body yang betul.
+        return ("model", get_int("health.anti_abuse_cooldown_ms"), "anti-abuse shape rejection")
     elif policy.lock == "drift":
         ttl = 15 * 60 * 1000
         scope = "account"

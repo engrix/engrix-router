@@ -24,8 +24,9 @@ Lock policy per class mirrors config/errorConfig.js:59-86 (401/402/403/404 ->
 120 s; rate-limit/quota/capacity/overloaded text -> exponential backoff capped at
 5 min; no match -> 30 s; plain 4xx -> NOT locked, accountFallback.js:59-61), plus
 the vendor classes 9router handles separately (codes 110 / 112 / 10605 / 103), plus
-the ZCode edge anti-abuse code 3012 (TASK-37: per-route POST block, resets at UTC
-midnight, any retry inside the window only extends it).
+the ZCode edge anti-abuse code 3012, which TASK-48 measured to be a rejection of
+the REQUEST SHAPE (scaffold position in the body), not a calendar window - so it
+locks one model briefly instead of the whole account until UTC midnight.
 """
 from __future__ import annotations
 
@@ -44,6 +45,7 @@ CLASS_MODEL_CONCURRENCY = "model_concurrency"  # vendor code 3009: 1 slot per mo
 CLASS_QUOTA_DAILY = "quota_daily"          # vendor code 110: habis hari ini
 CLASS_PRICING_BLOCKED = "pricing_blocked"  # vendor code 112 + pricingUrl
 CLASS_QUEUE_THROTTLED = "queue_throttled"  # vendor code 10605
+CLASS_ANTI_ABUSE = "anti_abuse_shape"      # vendor code 3012: bentuk body ditolak edge
 CLASS_CREDENTIAL_DEAD = "credential_dead"  # 401/403 dari upstream = token kita mati
 CLASS_PROTOCOL_DRIFT = "protocol_drift"    # signature invalid / replay 103
 CLASS_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
@@ -64,6 +66,7 @@ ALL_CLASSES = (
     CLASS_QUOTA_DAILY,
     CLASS_PRICING_BLOCKED,
     CLASS_QUEUE_THROTTLED,
+    CLASS_ANTI_ABUSE,
     CLASS_CREDENTIAL_DEAD,
     CLASS_PROTOCOL_DRIFT,
     CLASS_UPSTREAM_UNAVAILABLE,
@@ -98,7 +101,7 @@ class Policy:
     """What the gateway does and what the client sees, for one error class."""
 
     client_status: int
-    lock: str            # none | auth | short | transient | backoff | quota_window | model | drift
+    lock: str            # none | auth | short | transient | backoff | quota_window | model | anti_abuse | drift
     retry_internally: bool
     mark_connection: bool
     retry_after_s: int | None
@@ -115,9 +118,16 @@ _POLICIES: dict[str, Policy] = {
     # Kalau digabung ke rate_limited, backoff eksponensial ngunci 1 akun sehat
     # sampai 300 detik padahal 4 detik lagi slot-nya bebas.
     CLASS_MODEL_CONCURRENCY: Policy(429, "model", True, True, 3),
-    CLASS_QUOTA_DAILY: Policy(503, "quota_window", False, True, None),
+    # Akun ini habis hari ini, bukan provider-nya. Dengan lebih dari satu koneksi,
+    # berhenti di sini = klien mati padahal ada akun sehat di baris berikutnya --
+    # jadi boleh pindah koneksi (koneksi yang habis udah ke-lock sendiri).
+    CLASS_QUOTA_DAILY: Policy(503, "quota_window", True, True, None),
     CLASS_PRICING_BLOCKED: Policy(503, "model", False, False, 3600),
     CLASS_QUEUE_THROTTLED: Policy(429, "short", True, True, 8),
+    # 3012 ZCode: edge menolak BENTUK body. Yang salah request-nya, bukan akunnya,
+    # dan tidak ada jendela harian yang perlu ditunggu (TASK-48) -- kunci model itu
+    # sebentar, akun tetap layak dicoba, klien dapat Retry-After pendek.
+    CLASS_ANTI_ABUSE: Policy(503, "anti_abuse", False, True, 120),
     CLASS_CREDENTIAL_DEAD: Policy(503, "auth", False, True, 120),
     CLASS_PROTOCOL_DRIFT: Policy(502, "drift", False, True, None),
     CLASS_UPSTREAM_UNAVAILABLE: Policy(503, "transient", True, True, None),
@@ -180,6 +190,9 @@ _RATE_TEXT_RE = re.compile(
 _SIG_RE = re.compile(r"signature invalid|signature mismatch|invalid signature", re.I)
 _REPLAY_RE = re.compile(r"duplicate request", re.I)
 _BILLING_TEXT_RE = re.compile(r"billing|daily usage limit|usage limit for chat", re.I)
+# ZCode start-plan ngirim kuota harian habis sebagai HTTP 200 + {"code":1005,
+# "msg":"exceed quota limit"} -- tanpa kata "daily", jadi gak lewat _BILLING_TEXT_RE.
+_QUOTA_TEXT_RE = re.compile(r"exceed quota limit|quota limit exceeded", re.I)
 _EXPIRED_TOKEN_RE = re.compile(r"login expired|token (?:expired|invalid)|invalid_grant", re.I)
 _UNUSUAL_ACTIVITY_RE = re.compile(r"unusual activity", re.I)
 
@@ -189,7 +202,7 @@ def _next_utc_midnight(now: datetime | None = None) -> datetime:
     return (base + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-_SPECIAL_CODES = {"103", "110", "112", "10605", "3012"}
+_SPECIAL_CODES = {"103", "110", "112", "10605", "3012", "1005"}
 
 
 def classify_vendor_code(raw: str | None) -> str | None:
@@ -249,8 +262,13 @@ def classify(
     # 1) protocol drift -- bukan masalah trafik, ini upstream berubah.
     if _SIG_RE.search(lowered) or (code == "103") or _REPLAY_RE.search(lowered):
         return make(CLASS_PROTOCOL_DRIFT, body or "signature/replay rejection dari upstream")
-    # 2) kuota harian (kode 110) = jendela kalender, bukan cooldown biasa.
-    if code == "110" or (_BILLING_TEXT_RE.search(lowered) and "daily" in lowered):
+    # 2) kuota harian (kode 110, dan 1005 yang dikirim sebagai HTTP 200) = jendela
+    # kalender, bukan cooldown biasa. Jendela diproksikan ke tengah malam UTC: untuk
+    # 110 itu memang kalendernya, untuk 1005 batas aslinya belum kita ukur dari
+    # billing. Ledakan salahnya cuma bikin akun dicoba lagi lalu kena 1005 lagi
+    # (kunci diperpanjang sendiri), bukan bikin akun sehat dikunci -- jadi aman.
+    if code == "110" or code == "1005" or _QUOTA_TEXT_RE.search(lowered) \
+            or (_BILLING_TEXT_RE.search(lowered) and "daily" in lowered):
         reset = _next_utc_midnight(now)
         wait = max(60, int((reset - (now or datetime.now(timezone.utc))).total_seconds()))
         return make(
@@ -278,15 +296,14 @@ def classify(
     # 5) rate limit generik.
     if status == 429 or _RATE_TEXT_RE.search(lowered):
         return make(CLASS_RATE_LIMIT, body or "rate limited")
-    # 5b) ZCode edge anti-abuse (vendor code 3012): HTTP 405 "unusual activity". TASK-40
-    # membuktikan pemicunya BENTUK BODY di origin (micro-probe ditolak, body ber-scaffold
-    # 200 dalam menit yang sama), jadi kelas error tetap quota_daily (503, lock jendela)
-    # biar router tidak hammer, tapi adapter wajib seed shape (zcode._seed_shape).
+    # 5b) ZCode edge anti-abuse (vendor code 3012): HTTP 405 "unusual activity". TASK-48
+    # mengukur pemicunya POSISI scaffold di body, bukan jendela waktu dan bukan akun --
+    # jadi kelasnya anti_abuse_shape (kunci model sebentar, akun tetap hidup). Sebagai
+    # quota_daily kelas ini dulu mengunci '*' sampai UTC midnight: satu body yang
+    # bentuknya salah mematikan dua akun 6 jam penuh. Perbaikan bentuknya di adapter
+    # (zcode._seed_shape), bukan di sini.
     if code == "3012" or _UNUSUAL_ACTIVITY_RE.search(lowered):
-        reset = _next_utc_midnight(now)
-        wait = max(60, int((reset - (now or datetime.now(timezone.utc))).total_seconds()))
-        return make(CLASS_QUOTA_DAILY, body or "upstream anti-abuse block",
-                    retry_after_s=wait, reset_at=reset)
+        return make(CLASS_ANTI_ABUSE, body or "upstream rejected the request shape")
     # 6) kredensial mati (401/403 tanpa tanda billing) -> jangan 403 ke klien.
     if status in (401, 403) or _EXPIRED_TOKEN_RE.search(lowered):
         return make(CLASS_CREDENTIAL_DEAD, body or "upstream rejected the credentials", retry_after_s=120)

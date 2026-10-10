@@ -26,9 +26,10 @@ this build does not reproduce.
   in the vendor usage block is estimated (chars/4) into `requests.reasoning` instead of
   staying zero; TTFT is now stamped on the first frame carrying visible text or
   thinking, not on an empty role/ping frame (measures first seen token, not handshake).
-- ZCode vendor classification: edge anti-abuse code 3012 ("unusual activity") maps to
-  the daily-quota class with an UTC-midnight reset instead of `upstream_unavailable`,
-  so the router stops hammering a gated route instead of retrying into the flag.
+- ZCode vendor classification: edge anti-abuse code 3012 ("unusual activity") has its own
+  `anti_abuse_shape` class — `503` + `Retry-After` 120 with a model-scoped lock
+  (`health.anti_abuse_cooldown_ms`), no internal retry, no calendar window. TASK-48 measured
+  the trigger to be where the vendor's own scaffold sits in the body, not a daily quota.
 - Registry: the same provider module discovered through two paths (installed entry
   point + `EROUTER_PROVIDERS_PATH` under an editable install) no longer raises
   `DuplicatePrefix` — only genuinely different modules claiming one prefix do.
@@ -69,6 +70,40 @@ this build does not reproduce.
 
 ### Fixed
 
+- **The per-model probe no longer looks like a probe, and can no longer bench a
+  healthy account.** `POST /api/connections/{id}/test_models` used to send
+  `max_tokens: 8` + `"reply with OK"` — the exact micro shape ZCode's edge blocks
+  (405/3012). Each rejection locked one `(account, model)` pair for 120 s, so testing
+  three new accounts walked the whole provider into `all_locked`, and because the
+  vendor flags the *client*, real agent traffic that had returned 200 for an hour
+  started failing on the same body shape. The probe body is now a provider hook
+  (`BaseProvider.probe_body`; default = a natural sentence with `max_tokens: 64`), and
+  a probe's failure reports its own verdict without touching fleet health.
+- **A locked provider says how long it stays locked.** When every candidate was
+  locked the answer carried our generic 15 s default while the locks still had ~100 s
+  to run, so a client with a retry ladder hammered it (measured: 9 retries in 31 s).
+  `selector.next_opening_ms()` (9router `auth.js:114-133`) now reports the earliest
+  expiry as `Retry-After`, and the OpenAI error body carries `retry_after`/`reset_at`
+  instead of hand-building a body that dropped them.
+- **`tool_choice` strings are translated, not forwarded.** The canonical -> Anthropic
+  translator passed OpenAI's `"auto"`/`"none"` through verbatim, so every Anthropic-shaped
+  vendor answered `400 body.tool_choice: Input should be a valid dictionary`, and a client
+  that sent the proper Anthropic object hit `TypeError: unhashable type: dict` in
+  `choice in {"auto","none"}`. Strings now become `{"type": ...}`, `"required"` stays
+  `{"type":"any"}`, an Anthropic object passes through untouched, and an absent value
+  emits no key. (Found on live engrix-agent traffic; the agent was sending valid OpenAI.)
+- **A spent daily quota is no longer served as an empty success.** ZCode's start-plan route
+  answers `{"code":1005,"msg":"exceed quota limit"}` with **HTTP 200** (not 429/503, no SSE).
+  It was forwarded to the client as a completion chunk with no content, booked in the ledger
+  as a healthy call and left the connection marked `active`. The adapter now rejects the
+  envelope, `classify` knows code 1005 as `quota_daily`, and `quota_daily` may fail over to
+  the next connection — a dry account no longer blackouts the provider while a funded one
+  sits behind it.
+- **One rejected body no longer kills the provider for the rest of the day.** Code 3012 used
+  to classify as `quota_daily`, which took `unavailable` status plus a `'*'` account lock until
+  the next UTC midnight: two accounts answering a shape question wrongly were both removed from
+  routing for ~6 hours and every later request short-circuited to `503 all_locked`. It is now
+  `anti_abuse_shape` (model-scoped, `health.anti_abuse_cooldown_ms`, default 120 s).
 - The quota banner's `worst_remaining()` filtered on the global `MAX(fetched_at)`:
   with several connections polled at different moments it only ever considered the
   last one and could hide a 0%-left row from an earlier one. It now takes each

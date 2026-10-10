@@ -170,9 +170,10 @@ a client status, and the class name is what the client's SDK branches on (`error
 
 | upstream condition | class | to the client | state effect |
 |---|---|---|---|
-| vendor code 110 (daily quota spent) | `quota_daily` | `503` + `Retry-After` until the next UTC midnight | account lock until the reset |
+| vendor code 110 (daily quota spent) — and ZCode's code **1005**, which the same vendor sends as an **HTTP 200** body | `quota_daily` | `503` + `Retry-After` until the next UTC midnight | account lock until the reset; the request **fails over to the next connection** (a dry account must not black out the provider) |
 | vendor code 112 / pricing URL in the message | `pricing_blocked` | `503`, `Retry-After` 3600 | model lock, 1 hour |
 | vendor code 10605 (queue) | `queue_throttled` | `429` + `Retry-After` 8 | short lock; may retry internally |
+| vendor code 3012 (ZCode edge rejects the request **shape**) | `anti_abuse_shape` | `503` + `Retry-After` 120 | model lock only (`health.anti_abuse_cooldown_ms`); the account stays usable and there is no calendar window to wait for |
 | `401/403` **from upstream** (our credential is dead) | `credential_dead` | `503` + `Retry-After` 120 | connection -> `needs_reauth` |
 | bad signature / replay (`code 103`) | `protocol_drift` | `502` | **global freeze** 15 minutes after `health.protocol_drift_threshold` hits; cleared by `POST /api/drift/clear` |
 | `429` / rate-limit text | `rate_limited` | `429` + backoff | exponential backoff (`health.backoff_*`) |

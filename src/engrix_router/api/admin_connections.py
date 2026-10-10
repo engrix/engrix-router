@@ -174,7 +174,13 @@ async def test_models(connection_id: str, payload: dict[str, Any] | None = None)
     the traffic path must run the same code (the pattern of 9router's
     /api/providers/[id]/test-models, which loops back to its own gateway).
 
-    THIS SPENDS QUOTA. It requires an explicit {"allow_spend": true}.
+    THIS SPENDS QUOTA. It requires an explicit {"allow_spend": true}. On ZCode every
+    probe carries the desktop app's scaffold (the shape its edge demands), so one
+    probe costs ~20-25K prompt tokens per model -- `max_models` is the brake.
+
+    A probe result never moves fleet health: the body describes one synthetic call,
+    and one rejected probe used to take every account of a provider out of rotation
+    for 120 s each (TASK-48, 2026-10-10).
     """
     body = payload or {}
     if not body.get("allow_spend"):
@@ -185,16 +191,14 @@ async def test_models(connection_id: str, payload: dict[str, Any] | None = None)
         return {"provider": definition.id, "results": [], "note": "no models to test"}
     results: list[dict[str, Any]] = []
     limit = max(1, min(int(body.get("max_models") or 1), len(models)))
+    provider = registry.get_provider(definition.id)
+    ok_count = 0
     for model in models[:limit]:
-        chat_body = {
-            "model": f"{definition.prefixes[0]}/{model.id}",
-            "messages": [{"role": "user", "content": "reply with OK"}],
-            "max_tokens": 8,
-            "stream": False,
-        }
+        chat_body = provider.probe_body(f"{definition.prefixes[0]}/{model.id}")
         started = time.perf_counter()
         try:
-            await runner.run_chat(chat_body, lane="debug")
+            await runner.run_chat(chat_body, lane="debug", record_health=False)
+            ok_count += 1
             results.append({"model": model.id, "ok": True,
                             "latency_ms": int((time.perf_counter() - started) * 1000)})
         except runner.RequestRejected as exc:
@@ -203,7 +207,16 @@ async def test_models(connection_id: str, payload: dict[str, Any] | None = None)
         except Exception as exc:  # pragma: no cover
             results.append({"model": model.id, "ok": False,
                             "error": f"{exc.__class__.__name__}: {exc}"[:300]})
-    return {"provider": definition.id, "connection_id": connection_id, "results": results}
+    # Sukses di sini adalah bukti kredensial + transport hidup (payload lewat
+    # jalur asli) -- tandai probe supaya label dashboard ikut hijau; kegagalan
+    # TIDAK ditandai (lihat docstring: satu probe gagal gak boleh menggeser
+    # fleet health).
+    if ok_count:
+        state = health.mark_probe(connection_id, {"ok": True, "status": 200})
+    else:
+        state = None
+    return {"provider": definition.id, "connection_id": connection_id, "results": results,
+            **({"test_status": state["test_status"]} if state else {})}
 
 
 def resolve_pair(connection_id: str) -> tuple[Any, Credentials]:

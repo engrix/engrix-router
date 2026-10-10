@@ -68,6 +68,19 @@ def test_kuota_harian_jadi_503_bukan_403():
     assert c.retry_after_s and c.retry_after_s > 0
 
 
+def test_zcode_kuota_habis_datang_sebagai_http_200():
+    """TASK-48: 1005 "exceed quota limit" dikirim dengan status 200 -- kelasnya
+    jendela harian, dan BOLEH pindah koneksi: akun lain mungkin masih punya kuota."""
+    c = errors.classify(status=200, text='{"code":1005,"msg":"exceed quota limit",'
+                                        '"logid":"2026101018524435027a64fef881bb22c8"}')
+    assert c.error_class == errors.CLASS_QUOTA_DAILY
+    assert c.vendor_code == "1005"
+    assert c.client_status == 503
+    assert c.policy.retry_internally is True
+    assert c.policy.lock == "quota_window"
+    assert c.reset_at is not None and c.reset_at.tzinfo == timezone.utc
+
+
 def test_qoder_queue_throttle_inner_code_wins_over_status_echo():
     """Insiden 2026-10-09 21:58: vendor bungkus 10605 dalam 403 bertingkat --
     `"code":"403"` di luar nyaris menenggelamkan kode yang punya policy sendiri,

@@ -34,16 +34,12 @@ router = APIRouter()
 
 def _error_response(exc: runner.RequestRejected) -> JSONResponse:
     classified = exc.classified
-    body = {
-        "error": {
-            "message": exc.message[:900],
-            "type": "server_error" if classified.client_status >= 500 else "invalid_request_error",
-            "code": classified.error_class,
-            "status": classified.client_status,
-            "vendor_code": classified.vendor_code,
-        }
-    }
-    retry_after = classified.retry_after_effective(settings.get_int("client.retry_after_default_s"))
+    default_s = settings.get_int("client.retry_after_default_s")
+    # Satu builder (Classified.error_body) buat dua arah: body dulu ditulis ulang
+    # di sini tanpa `retry_after`/`reset_at`, jadi header bilang "tunggu 118s"
+    # sementara body yang dibaca SDK klien diam-diam balik lagi ke default 15s.
+    body = classified.error_body(default_s)
+    retry_after = classified.retry_after_effective(default_s)
     headers = {"Retry-After": str(retry_after)} if retry_after else {}
     return JSONResponse(body, status_code=classified.client_status, headers=headers)
 

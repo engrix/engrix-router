@@ -142,6 +142,16 @@ def _delta_reasoning_len(frame: dict[str, Any]) -> int:
     return total
 
 
+def _delta_tool_call_present(frame: dict[str, Any]) -> bool:
+    # # Turn yang isinya cuma tool-call (agentic loop) gak punya content/
+    # # reasoning sama sekali -- tanpa cek ini TTFT-nya NULL padahal klien
+    # # jelas udah nerima token pertama (TASK-50 bug #3).
+    for choice in frame.get("choices") or []:
+        if (choice.get("delta") or {}).get("tool_calls"):
+            return True
+    return False
+
+
 def _completion_as_chunk(response: dict[str, Any], *, model: str) -> dict[str, Any]:
     """
     Wrap a chat.completion into a single chunk.
@@ -176,7 +186,7 @@ def _completion_as_chunk(response: dict[str, Any], *, model: str) -> dict[str, A
 
 async def _dispatch(
     *, payload: dict[str, Any], definition: ProviderDef, model: str, trace: trace_mod.RequestTrace,
-    api_key_id: str | None, stream: bool,
+    api_key_id: str | None, stream: bool, record_health: bool = True,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     Send through connection candidates.
@@ -184,6 +194,10 @@ async def _dispatch(
     Yields OpenAI-shaped chunks, or one dict {'__error__': True, ...} when
     every option is exhausted. Final usage is attached to the trace.
 
+    `record_health=False` is for the dashboard's own per-model probe: a failed
+    probe is a verdict about the probe, and must not pull a working account or
+    model out of rotation (that is how one micro-probe took out four accounts on
+    2026-10-10). Successes still record -- a probe that works proves health.
     """
     provider = registry.get_provider(definition.id)
     excluded: set[str] = set()
@@ -201,8 +215,11 @@ async def _dispatch(
         if chosen is None:
             reason = skipped[0]["reason"] if skipped else "this provider has no connections yet"
             message = f"no healthy connection: {reason}"
+            opening = selector.next_opening_ms(skipped)
+            wait_s = max(1, (opening - now_ms()) // 1000) if opening else None
             yield {"__error__": True, "message": message, "code": errors.CLASS_ALL_LOCKED,
-                   "status": 503, "upstream_status": None, "vendor_code": None}
+                   "status": 503, "upstream_status": None, "vendor_code": None,
+                   "retry_after": wait_s}
             return
 
         trace.bind_connection(chosen.credentials.connection_id)
@@ -270,7 +287,7 @@ async def _dispatch(
                     # # usage-only) dulu ikut nge-set TTFT, jadi angka 605ms itu
                     # # RTT handshake — bukan latency model. Yang ngukur RTT murni
                     # # tetap trace.stage UPSTREAM_IN.
-                    if content_len or reasoning_len:
+                    if content_len or reasoning_len or _delta_tool_call_present(chunk):
                         trace.note_first_token()
                     trace.note_frame(content_len, reasoning_chars=reasoning_len)
                     yield chunk
@@ -325,7 +342,11 @@ async def _dispatch(
         finally:
             _settle_now(0)
 
-        decision = health.register_error(chosen.credentials.connection_id, model, classified)
+        if record_health:
+            decision = health.register_error(chosen.credentials.connection_id, model, classified)
+        else:
+            decision = {"locked": False, "scope": "none", "lock_ms": 0,
+                        "reason": "probe: health state untouched"}
         applog.request_failed(
             rid=trace.request_id, provider=definition.id, model=model,
             total_ms=now_ms() - trace.started_ms, error_class=classified.error_class,
@@ -376,8 +397,13 @@ async def _dispatch(
 
 async def run_chat(body: dict[str, Any], *, api_key_id: str | None = None,
                    lane: str = "interactive",
-                   endpoint: str = "/v1/chat/completions") -> dict[str, Any]:
-    """Non-stream path. Raises RequestRejected when refused or out of options."""
+                   endpoint: str = "/v1/chat/completions",
+                   record_health: bool = True) -> dict[str, Any]:
+    """Non-stream path. Raises RequestRejected when refused or out of options.
+
+    `record_health=False` is for callers whose result describes ONE call, not the
+    fleet (the dashboard's per-model probe) -- see _dispatch.
+    """
     definition, model = _resolve(body)
     trace = trace_mod.begin(endpoint, api_key_id=api_key_id, budget_lane=lane)
     trace.bind_target(provider=definition.id, model=model)
@@ -386,15 +412,25 @@ async def run_chat(body: dict[str, Any], *, api_key_id: str | None = None,
 
     chunks: list[dict[str, Any]] = []
     async for frame in _dispatch(payload=dict(body), definition=definition, model=model, trace=trace,
-                                 api_key_id=api_key_id, stream=False):
+                                 api_key_id=api_key_id, stream=False, record_health=record_health):
         if frame.get("__error__"):
             trace.finish(status=trace_mod.STATUS_UPSTREAM_ERROR, http_out=int(frame["status"]),
                          error_class=str(frame["code"]), error_text=str(frame["message"]),
                          upstream_status=frame.get("upstream_status"), error_code=frame.get("vendor_code"))
-            raise RequestRejected(
-                errors.classify(status=int(frame["status"]), text=str(frame["message"]),
-                                vendor_code=frame.get("vendor_code"),
-                                exception_name=str(frame.get("code"))))
+            code = str(frame.get("code") or "")
+            if code in errors.ALL_CLASSES:
+                # Keputusan yang udah kita ambil sendiri gak boleh dilempar balik ke
+                # classify(): status 503 + "no healthy connection" mendarat di
+                # upstream_unavailable, jadi label all_locked ilang dari log DAN dari
+                # error body, plus Retry-After hasil next_opening_ms ikut kebuang.
+                classified = errors.for_class(code, str(frame.get("message") or ""),
+                                              retry_after_s=frame.get("retry_after"),
+                                              vendor_code=frame.get("vendor_code"))
+            else:
+                classified = errors.classify(status=int(frame["status"]), text=str(frame["message"]),
+                                             vendor_code=frame.get("vendor_code"),
+                                             exception_name=code or None)
+            raise RequestRejected(classified)
         chunks.append(frame)
     usage = trace.usage or usage_mod.estimate_from_body(body)
     completion = openai_fmt.to_completion(trace.request_id, str(body.get("model") or model), chunks,

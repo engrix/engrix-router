@@ -318,6 +318,26 @@ class BaseProvider:
                 )
         return models
 
+    def probe_body(self, model_id: str) -> dict[str, Any]:
+        """Body for POST /api/connections/{id}/test_models.
+
+        Deliberately NOT a micro probe. An upstream whose edge fingerprints request
+        SHAPE (ZCode: 405/3012 "unusual activity" for `max_tokens` 8 + "reply with
+        OK") reads a synthetic probe as bot traffic, and that flag is per CLIENT, not
+        per request: measured on 2026-10-10, real agent traffic that returned 200 at
+        19:27 started returning 3012 at 19:39 right after the dashboard probed three
+        new accounts with the micro body. A probe has to look like the traffic it is
+        testing. Vendors with a stricter shape rule override this and add whatever
+        their own app sends.
+        """
+        return {
+            "model": model_id,
+            "messages": [{"role": "user",
+                          "content": "Reply with the single word OK and nothing else."}],
+            "max_tokens": 64,
+            "stream": False,
+        }
+
     async def probe(self, creds: Credentials, model_id: str | None = None) -> ProbeResult:
         """
         models_list tier: cheap, costs no tokens. Other providers may override.

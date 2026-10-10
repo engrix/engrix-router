@@ -57,6 +57,26 @@ def test_tools_and_tool_choice_are_translated():
     assert canonical["stop"] == ["END"]
 
 
+def test_tool_choice_never_reaches_an_anthropic_route_as_a_string():
+    """TASK-48: vendor menjawab 400 "body.tool_choice: Input should be a valid
+    dictionary" buat string OpenAI "auto"/"none", dan dict yang diuji `in {...}`
+    melempar TypeError: unhashable. Dua-duanya lewat fungsi ini, jadi diuji sekaligus."""
+    base = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 32,
+            "tools": [{"type": "function", "function": {"name": "foo", "description": "d",
+                        "parameters": {"type": "object"}}}]}
+    for value, expected in (
+        ("auto", {"type": "auto"}),
+        ("none", {"type": "none"}),
+        ("required", {"type": "any"}),
+        ({"type": "function", "function": {"name": "foo"}},
+         {"type": "tool", "tool_name": "foo"}),
+        ({"type": "auto"}, {"type": "auto"}),
+        ({"type": "tool", "tool_name": "foo"}, {"type": "tool", "tool_name": "foo"}),
+    ):
+        assert anthropic_provider._to_native({**base, "tool_choice": value})["tool_choice"] == expected
+    assert "tool_choice" not in anthropic_provider._to_native(base)
+
+
 # ── 2. canonical -> inbound response shape ───────────────────────────────────
 def test_completion_becomes_anthropic_message():
     message = fmt.from_canonical_completion("abc", "anthropic/claude-x", {

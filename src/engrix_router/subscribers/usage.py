@@ -49,14 +49,24 @@ def extract(chunk: Any) -> dict[str, int] | None:
     completion = _int(raw.get("completion_tokens", raw.get("output_tokens", raw.get("completion"))))
     if not any((prompt, completion, raw.get("total_tokens"))):
         return None
+    cached = _int(prompt_details.get("cached_tokens",
+                                     raw.get("cached_tokens", raw.get("cache_read_input_tokens"))))
+    cache_creation = _int(prompt_details.get("cache_creation_input_tokens",
+                                             raw.get("cache_creation_input_tokens")))
+    # Konvensi Anthropic: input_tokens TIDAK termasuk cache_read/cache_creation,
+    # sedangkan `prompt` kanonik kita (konvensi OpenAI, lihat canonicalize())
+    # HARUS sudah mencakup keduanya. Tanpa lipatan ini satu call ~20K token
+    # yang kebaca cache tercatat puluhan token di ledger -- usage_daily dan
+    # cost_usd jadi understate ~99% (TASK-50 bug #1). Lengan OpenAI murni
+    # (prompt_tokens) tidak tersentuh, jadi guard cached<=prompt tetap valid.
+    if "input_tokens" in raw and "prompt_tokens" not in raw:
+        prompt += cached + cache_creation
     usage = {
         "prompt": prompt,
         "completion": completion,
         "reasoning": _int(details.get("reasoning_tokens")),
-        "cached": _int(prompt_details.get("cached_tokens",
-                                         raw.get("cached_tokens", raw.get("cache_read_input_tokens")))),
-        "cache_creation": _int(prompt_details.get("cache_creation_input_tokens",
-                                                  raw.get("cache_creation_input_tokens"))),
+        "cached": cached,
+        "cache_creation": cache_creation,
         "total": _int(raw.get("total_tokens")),
     }
     if not usage["total"]:
