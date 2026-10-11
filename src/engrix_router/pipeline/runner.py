@@ -34,6 +34,7 @@ from engrix_router.core import config
 from engrix_router.storage.sqlite import now_ms
 from engrix_router.core import logs as applog
 from engrix_router.accounts import health
+from engrix_router.accounts import cascade as cascade_mod
 from engrix_router.hooks import budget, ratelimit
 from engrix_router.routing import selector
 from engrix_router.storage import settings
@@ -203,6 +204,7 @@ async def _dispatch(
     excluded: set[str] = set()
     attempts = 0
     concurrency_retries = 0
+    bytes_sent = False  # TASK-70: cascade breaker hanya fail-fast sebelum byte pertama
     max_attempts = max(1, settings.get_int("routing.max_connections_per_request"))
     deadline = time.monotonic() + config.UPSTREAM_TOTAL_TIMEOUT_S
     usage_acc: dict[str, Any] = {}
@@ -210,6 +212,21 @@ async def _dispatch(
     trace.stage(trace_mod.STEP_OPENAI_MID, {**payload, "model": model, "stream": stream}, direction="out")
 
     while True:
+        # # TASK-70: anti-abuse cascade -- ketika edge vendor menolak BENTUK
+        # # payload (3012) di beberapa akun berbeda dalam window pendek, akun
+        # # berikutnya bukan obat: edge menandai KLIEN, bukan akun. Fail-fast
+        # # tanpa menyentuh satu akun pun, sampai pause-nya habis sendiri.
+        # # Request yang byte-nya sudah jalan di-stream tidak bisa diulang,
+        # # jadi biarkan jalur stop_reason biasa yang menangani.
+        paused, pause_until = cascade_mod.is_paused(model)
+        if paused and not bytes_sent:
+            wait_s = max(1, (pause_until - now_ms()) // 1000)
+            yield {"__error__": True,
+                   "message": f"anti-abuse cascade: model {model} paused {wait_s}s "
+                              f"(>= {settings.get_int('health.cascade_min_accounts')} distinct accounts rejected)",
+                   "code": errors.CLASS_ALL_LOCKED, "status": 503, "upstream_status": None,
+                   "vendor_code": None, "retry_after": wait_s}
+            return
         chosen, skipped, plan = selector.pick(definition, model, exclude=excluded)
         selector.log_plan(plan, chosen, skipped, rid=trace.request_id)
         if chosen is None:
@@ -274,6 +291,7 @@ async def _dispatch(
                 async for chunk in provider.open_stream(request):
                     if not got_first:
                         got_first = True
+                        bytes_sent = True
                         trace.stage(trace_mod.STEP_UPSTREAM_IN, chunk, direction="in")
                     found = usage_mod.extract(chunk)
                     if found:
@@ -294,6 +312,7 @@ async def _dispatch(
             else:
                 response = await provider.complete(request)
                 got_first = True
+                bytes_sent = True
                 trace.stage(trace_mod.STEP_UPSTREAM_IN, response, direction="in")
                 found = usage_mod.extract(response)
                 if found:
@@ -344,6 +363,16 @@ async def _dispatch(
 
         if record_health:
             decision = health.register_error(chosen.credentials.connection_id, model, classified)
+            # # TASK-70: satu 3012 = lock akun itu (di atas). Jika beberapa
+            # # akun BERBEDA kena 3012 untuk model yang sama dalam window
+            # # pendek, edge sedang menolak bentuk payload KLIEN -- failover
+            # # hanya menyebarkan blok. Catat dan pause seluruh model.
+            if classified.error_class == errors.CLASS_ANTI_ABUSE:
+                if cascade_mod.note_anti_abuse(model, chosen.credentials.connection_id):
+                    applog.warn(applog.NS_HEALTH,
+                                f"anti-abuse CASCADE on {model}: paused "
+                                f"{settings.get_int('health.cascade_pause_ms') // 1000}s "
+                                f"after {settings.get_int('health.cascade_min_accounts')} distinct accounts got 3012")
         else:
             decision = {"locked": False, "scope": "none", "lock_ms": 0,
                         "reason": "probe: health state untouched"}

@@ -44,6 +44,11 @@ DEFAULTS: dict[str, tuple[Any, type, str]] = {
     "health.quota_reconcile_min_pct": (5, int,
                                        "release a quota_daily lock only when EVERY measurable vendor scope still has at least this % left"),
     "health.protocol_drift_threshold": (2, int, "how many sig_invalid/replay hits before the gateway freezes every upstream"),
+    "health.cascade_min_accounts": (3, int,
+                                     "distinct accounts hit by anti-abuse (3012) within the window before the whole model pauses"),
+    "health.cascade_window_ms": (60_000, int, "window in which distinct 3012 accounts are counted"),
+    "health.cascade_pause_ms": (90_000, int,
+                                "how long a tripped model pauses; new requests fail fast instead of feeding more accounts to the edge"),
     "health.self_heal_unavailable": (True, bool, "unavailable may return to cooling on its own once every lock expired"),
     # Status, bukan konfigurasi -- tapi kita persist di tabel settings supaya
     # tripped-nya gak ilang kalau proses restart (9router: cache health di RAM,
