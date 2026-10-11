@@ -15,6 +15,13 @@ this build does not reproduce.
 
 ### Added
 
+- Dashboard restart that actually restarts (TASK-60): the endpoint spawned a
+  DETACHED powershell helper, but powershell.exe is a console app and dies
+  instantly when started console-less on this machine (measured: 4 clicks, 4x
+  "POST /api/system/restart 200 OK", zero helper executions). It now generates
+  a `.vbs` launcher and spawns it via wscript.exe (GUI subsystem, the same
+  proven pattern as the watchdog); helper output lands in
+  `logs/router-restart.log` so failures are no longer silent.
 - In-flight sweeper: a process that dies mid-request (kill, crash, power) used to
   leave `requests` rows in `in_flight` forever -- the retention query explicitly
   spares that status (TASK-58 #4: 93 corpses measured, the oldest 20 hours). A
