@@ -40,6 +40,7 @@ from engrix_router.accounts import health
 from engrix_router.providers import registry
 from engrix_router.services import quota_sync
 from engrix_router.storage import settings
+from engrix_router.subscribers import trace as trace_mod
 from engrix_router.transport import http_client
 from engrix_router.web import dashboard
 
@@ -66,12 +67,18 @@ async def lifespan(app: FastAPI):
     if interval > 0:
         task = asyncio.create_task(quota_sync.run_forever(stop=stop, sleep_s=interval))
         applog.info(applog.NS_APP, f"quota sync started (every {interval}s)")
+    trace_task = None
+    if settings.get_int("observability.in_flight_sweep_s") > 0:
+        trace_task = asyncio.create_task(trace_mod.sweep_in_flight_stale(stop=stop))
+        applog.info(applog.NS_APP, "in_flight sweeper started")
     for label, error in failed.items():
         applog.warn(applog.NS_PROVIDER, f"provider {label} failed to load and cannot be routed: {error}")
     yield
+    stop.set()
     if task is not None:
-        stop.set()
         await asyncio.wait_for(task, timeout=5.0)
+    if trace_task is not None:
+        await asyncio.wait_for(trace_task, timeout=5.0)
     await http_client.aclose_all()
     applog.info(applog.NS_APP, "clean shutdown: HTTP pools closed")
 

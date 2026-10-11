@@ -234,7 +234,13 @@ def _quota_meter(connection_id: str, *, not_before: int) -> dict[str, Any]:
     measurable = [r for r in rows if not r["unlimited"] and r["remaining_pct"] is not None]
     if not measurable:
         return {}
-    resets = [int(r["reset_at"]) for r in rows if r["reset_at"]]
+    # reset_at hanya dari scope TERUKUR (TASK-58 #3): baris unlimited membawa
+    # sentinel vendor (tahun 9999) dan max() di bawah menariknya masuk -- lock
+    # quota_window dari meter jadi ~8000 tahun (kasus qoder moreno valentino).
+    # Horizon cap adalah pengaman kedua untuk reset terukur yang meleset jauh.
+    horizon = get_int("health.quota_reset_horizon_ms")
+    resets = [int(r["reset_at"]) for r in measurable
+              if r["reset_at"] and int(r["reset_at"]) <= now_ms() + horizon]
     return {"min_pct": min(float(r["remaining_pct"]) for r in measurable),
             "reset_at_ms": max(resets) if resets else None}
 
@@ -368,12 +374,22 @@ def register_error(connection_id: str, model: str, classified: errors.Classified
             "error_class": error_class, "status": status, "backoff_level": backoff_level}
 
 
-def register_success(connection_id: str, *, ts: int | None = None, counted: bool = True) -> None:
+def register_success(connection_id: str, model: str | None = None, *, ts: int | None = None) -> None:
     """
     Success resets backoff, marks the connection active and clears its locks.
 
-    Success clears a '*' lock too, but not a per-model lock (a model limit is
-    specific; a healthy call to another model does not lift it).
+    WHICH locks a success lifts is scoped, mirroring the error side (TASK-58 #1):
+      * the '*' account lock and every EXPIRED lock go -- they say nothing
+        about a working account;
+      * the lock of the model that just worked goes (its limit is disproven);
+      * a LIVE lock for a DIFFERENT model stays. register_error put it there
+        on evidence; a healthy call to another model is not evidence against
+        it -- silently deleting it turned every genuine quota lock into a
+        one-request punishment and re-hit the vendor every next request.
+
+    consecutive_use_count is NOT touched here (TASK-58 #8): selection
+    (mark_selected) owns that counter -- bumping it per successful request
+    too double-counted every turn (measured 112-113 with sticky_limit=3).
 
     """
     moment = now_ms() if ts is None else ts
@@ -385,13 +401,18 @@ def register_success(connection_id: str, *, ts: int | None = None, counted: bool
             " WHERE connection_id=?",
             (STATUS_ACTIVE, moment, moment, connection_id),
         )
-        if counted:
+        if model:
             db.execute(
-                "UPDATE connection_health SET consecutive_use_count = consecutive_use_count + 1,"
-                " updated_at=? WHERE connection_id=?",
-                (moment, connection_id),
+                "DELETE FROM model_locks WHERE connection_id = ?"
+                " AND (model = ? OR model = ? OR locked_until <= ?)",
+                (connection_id, ACCOUNT_WILDCARD, model, moment),
             )
-        db.execute("DELETE FROM model_locks WHERE connection_id = ?", (connection_id,))
+        else:
+            db.execute(
+                "DELETE FROM model_locks WHERE connection_id = ?"
+                " AND (model = ? OR locked_until <= ?)",
+                (connection_id, ACCOUNT_WILDCARD, moment),
+            )
 
 
 def touch_used(connection_id: str, *, bump_count: bool, ts: int | None = None) -> None:

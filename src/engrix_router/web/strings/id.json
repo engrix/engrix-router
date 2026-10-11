@@ -243,6 +243,8 @@
   "settings.doc.routing.sticky_round_robin_limit": "berapa request beruntun nempel ke akun yang sama",
   "settings.doc.routing.strategy": "fill-first | round-robin | least-recent",
   "settings.doc.services.quota_sync_interval_s": "seringnya job kuota nanya tiap vendor; 0 = mati",
+"settings.doc.observability.in_flight_sweep_s": "tiap berapa detik request in_flight yang ditinggal mati proses di-sweep jadi aborted; 0 = mati",
+"settings.doc.observability.in_flight_stale_ms": "in_flight lebih tua dari ini dianggap terbengkalai dan di-sweep (default 30 menit)",
   "settings.group.budget": "Anggaran harian",
   "settings.group.catalog": "Katalog model",
   "settings.group.client": "Perilaku klien",

@@ -89,26 +89,33 @@ def next_opening_ms(skipped: list[dict[str, Any]], *, ts: int | None = None) -> 
     return min(openings) if openings else None
 
 
-def mark_selected(candidate: Candidate, *, sticky: bool) -> None:
+def mark_selected(candidate: Candidate) -> None:
     """Record the selection BEFORE sending (not after), like 9router, which writes
     lastUsedAt/consecutiveUseCount at selection time (auth.js:172-192).
 
-    sticky=True  -> stays on the same account: the counter goes up.
-    sticky=False -> we move to another account: the counter resets to 1.
+    The counter means "how many consecutive selections landed on THIS account"
+    (auth.js:166-174): +1 only when the previous selection was the same
+    connection, reset to 1 when we moved. The old caller-side `sticky=`
+    flag tied it to the strategy instead, so a round-robin gateway counted
+    it up unbounded (measured 112-113, TASK-58 #2) and order()'s sticky
+    window never closed. register_success deliberately does not bump it
+    again either (it used to -- every success double-counted, TASK-58 #8).
+
     """
+    connection_id = candidate.credentials.connection_id
+    moment = now_ms()
     with transaction() as db:
-        if sticky:
-            db.execute(
-                "UPDATE connection_health SET last_used_at=?, consecutive_use_count="
-                " consecutive_use_count + 1, updated_at=? WHERE connection_id=?",
-                (now_ms(), now_ms(), candidate.credentials.connection_id),
-            )
-        else:
-            db.execute(
-                "UPDATE connection_health SET last_used_at=?, consecutive_use_count=1, updated_at=?"
-                " WHERE connection_id=?",
-                (now_ms(), now_ms(), candidate.credentials.connection_id),
-            )
+        prev = db.execute(
+            "SELECT connection_id FROM connection_health WHERE last_used_at IS NOT NULL"
+            " ORDER BY last_used_at DESC, connection_id LIMIT 1"
+        ).fetchone()
+        sticky = bool(prev and prev[0] == connection_id)
+        db.execute(
+            "UPDATE connection_health SET last_used_at=?, updated_at=?,"
+            " consecutive_use_count = CASE WHEN ? THEN consecutive_use_count + 1 ELSE 1 END"
+            " WHERE connection_id=?",
+            (moment, moment, 1 if sticky else 0, connection_id),
+        )
 
 
 def describe(candidate: Candidate | None) -> str:

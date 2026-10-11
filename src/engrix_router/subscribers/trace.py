@@ -13,11 +13,13 @@ pattern from requestDetailsRepo.js:80-86 instead of silently substringing.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 from engrix_router.storage.sqlite import execute, now_ms, query, query_one, transaction
 from engrix_router.storage import settings
+from engrix_router.core import logs as applog
 from engrix_router.core.ids import new_id
 
 STATUS_IN_FLIGHT = "in_flight"
@@ -261,6 +263,42 @@ class RequestTrace:
                 " AND status != ?",
                 (days, STATUS_IN_FLIGHT),
             )
+
+
+def sweep_in_flight_once(*, stale_ms: int | None = None) -> int:
+    """One pass: mark abandoned in_flight requests as `aborted`, return the count.
+
+    A process that dies mid-request (kill, crash, power loss) leaves its rows in
+    `in_flight`; the retention query deliberately spares that status, so without
+    this sweep those rows live forever -- measured TASK-58 #4: 93 corpses, the
+    oldest 20 hours. `in_flight_stale_ms` is generous (default 30 minutes): a
+    live request stream is never touched, only rows whose owner is gone.
+    Idempotent: sweeping twice in a row finds nothing the second time.
+    """
+    stale = settings.get_int("observability.in_flight_stale_ms") if stale_ms is None else stale_ms
+    if stale <= 0:
+        return 0
+    with transaction() as db:
+        cursor = db.execute(
+            "UPDATE requests SET status=?, finished_at=? WHERE status=? AND ts <= ?",
+            (STATUS_ABORTED, now_ms(), STATUS_IN_FLIGHT, now_ms() - stale),
+        )
+        swept = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+    if swept:
+        applog.warn(applog.NS_TRACE, f"swept {swept} abandoned in_flight request(s) -> aborted")
+    return swept
+
+
+async def sweep_in_flight_stale(*, stop: asyncio.Event, sleep_s: int | None = None) -> None:
+    """Background loop wrapping sweep_in_flight_once until `stop` is set."""
+    if sleep_s is None:
+        sleep_s = settings.get_int("observability.in_flight_sweep_s")
+    while not stop.is_set():
+        sweep_in_flight_once()
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=max(5, int(sleep_s)))
+        except (asyncio.TimeoutError, TimeoutError):
+            continue
 
 
 def begin(endpoint: str, *, kind: str = "chat", api_key_id: str | None = None,

@@ -15,6 +15,22 @@ this build does not reproduce.
 
 ### Added
 
+- In-flight sweeper: a process that dies mid-request (kill, crash, power) used to
+  leave `requests` rows in `in_flight` forever -- the retention query explicitly
+  spares that status (TASK-58 #4: 93 corpses measured, the oldest 20 hours). A
+  background sweep marks rows older than `observability.in_flight_stale_ms` as
+  `aborted` every `observability.in_flight_sweep_s` seconds.
+- Lock accounting corrected (TASK-58 #1/#2/#3/#8): success no longer deletes every
+  lock of the account (only `*`, the model that just worked, and expired locks
+  lift; a live per-model lock stays until its own evidence expires), the sticky
+  counter counts consecutive selections of the SAME account (9router auth.js:166
+  semantics) instead of being bumped per-strategy and per-success (measured
+  112-113 with limit 3), and meter-derived quota resets from unlimited scopes
+  (vendor sentinel year-9999) can no longer seed a multi-year lock -- they are
+  filtered and capped by `health.quota_reset_horizon_ms`.
+- `register_defaults` invalidates the settings cache now (`global _cache` was
+  missing, so the invalidation rebound a local name -- TASK-58 #5).
+
 - OAuth+ account linking: `/api/oauth/{provider}/start` + `/api/oauth/{provider}/{session}`
   run the vendor's own browser login flow (provider packages contribute `oauth_start` /
   `oauth_poll` hooks; core owns the session state machine, single-use expiry, local

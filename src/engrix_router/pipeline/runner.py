@@ -232,7 +232,7 @@ async def _dispatch(
                                                  "wire": {"url": request.url, "query": request.query,
                                                             "body_bytes": len(request.body_bytes or b"")}},
                     direction="out")
-        selector.mark_selected(chosen, sticky=plan["strategy"] == selector.STRATEGY_ROUND_ROBIN)
+        selector.mark_selected(chosen)
         reservation = budget.reserve(provider=definition.id, api_key_id=api_key_id,
                                      est_tokens=estimate_prompt_tokens(payload))
         # # Benteng reserve->settle (audit TASK-45 #1): asyncio.CancelledError
@@ -307,7 +307,7 @@ async def _dispatch(
                 yield _completion_as_chunk(response, model=str(payload.get("model") or model))
             trace.attach_usage(usage_acc, signals=signals_acc)
             _settle_now(int(usage_acc.get("total") or 0))
-            health.register_success(chosen.credentials.connection_id)
+            health.register_success(chosen.credentials.connection_id, model)
             return
         except asyncio.CancelledError:
             # # Client cabut di tengah jalan: token yang udah kecatat dari

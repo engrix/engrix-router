@@ -38,6 +38,8 @@ DEFAULTS: dict[str, tuple[Any, type, str]] = {
     "health.backoff_base_ms": (2_000, int, "rate limit: 2^level * base"),
     "health.backoff_max_ms": (300_000, int, "cap backoff rate limit"),
     "health.backoff_max_level": (15, int, "cap level backoff"),
+"health.quota_reset_horizon_ms": (7 * 86_400_000, int,
+                                  "cap the reset horizon taken from a vendor meter; vendor sentinels (year 9999) die here"),
     "health.lock_plain_4xx": (False, bool, "400/406 may lock an account? default NO (anti self-DoS guard)"),
     "health.quota_reconcile_min_pct": (5, int,
                                        "release a quota_daily lock only when EVERY measurable vendor scope still has at least this % left"),
@@ -77,6 +79,10 @@ DEFAULTS: dict[str, tuple[Any, type, str]] = {
     "observability.max_records": (5000, int, "row cap for the requests table"),
     "observability.max_stage_bytes": (65536, int, "truncate payloads larger than this"),
     "observability.retention_days": (90, int, "delete requests older than this"),
+"observability.in_flight_sweep_s": (300, int,
+                                    "sweep in_flight requests abandoned by a dead process every N seconds; 0 = off"),
+"observability.in_flight_stale_ms": (1_800_000, int,
+                                     "an in_flight request older than this counts as abandoned (swept to aborted)"),
     # ── provider/node guard ──
     "nodes.allow_private_urls": (False, bool, "SSRF guard: False = reject 127/10/172.16/192.168/169.254 targets"),
     "nodes.validate_before_create": (True, bool, "call the upstream /models endpoint before saving a node"),
@@ -100,6 +106,7 @@ def register_defaults(mapping: dict[str, tuple[Any, type, str]], *, owner: str) 
     default is a hard error: silently overwriting a default would change behaviour
     depending on import order.
     """
+    global _cache  # TASK-58 #5: invalidasi tanpa ini cuma merebinding nama lokal
     with _lock:
         for key, entry in mapping.items():
             if not key.startswith(f"{owner}."):
