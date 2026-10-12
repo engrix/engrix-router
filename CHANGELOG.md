@@ -15,6 +15,12 @@ this build does not reproduce.
 
 ### Added
 
+- Transient hold instead of fail-fast (TASK-77): when every candidate is skipped
+  for a SHORT transient lock, the runner now holds the request until the nearest
+  lock expires (budget `routing.transient_hold_ms`, default 25s) and re-picks
+  once -- mirroring the queueing an IDE client does (qoder contract 10605).
+  The qoder storm of 05:33 UTC logged 21 all_locked errors, 17 of them
+  sub-100ms fail-fasts against locks the vendor cleared itself within ~90s.
 - Dashboard restart that actually restarts (TASK-60): the endpoint spawned a
   DETACHED powershell helper, but powershell.exe is a console app and dies
   instantly when started console-less on this machine (measured: 4 clicks, 4x

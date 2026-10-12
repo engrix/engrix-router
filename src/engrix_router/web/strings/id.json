@@ -242,6 +242,7 @@
   "settings.doc.routing.per_provider": "{'<provider id>': {'strategy': 'round-robin', 'sticky_round_robin_limit': 1}}",
   "settings.doc.routing.sticky_round_robin_limit": "berapa request beruntun nempel ke akun yang sama",
   "settings.doc.routing.strategy": "fill-first | round-robin | least-recent",
+  "settings.doc.routing.transient_hold_ms": "kalau semua akun ke-skip karena lock transien pendek, tahan request sampai lock terdekat buka (dibatasi budget ms ini) lalu coba pilih sekali lagi, jangan langsung gagal; 0 = matikan",
   "settings.doc.services.quota_sync_interval_s": "seringnya job kuota nanya tiap vendor; 0 = mati",
 "settings.doc.observability.in_flight_sweep_s": "tiap berapa detik request in_flight yang ditinggal mati proses di-sweep jadi aborted; 0 = mati",
 "settings.doc.observability.in_flight_stale_ms": "in_flight lebih tua dari ini dianggap terbengkalai dan di-sweep (default 30 menit)",

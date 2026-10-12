@@ -185,6 +185,37 @@ def _completion_as_chunk(response: dict[str, Any], *, model: str) -> dict[str, A
     }
 
 
+def _transient_hold_wait_s(skipped: list[dict[str, Any]], opening: int | None) -> int:
+    """TASK-77: seconds worth holding when every skipped account is under a
+    SHORT transient lock; 0 whenever holding cannot help.
+
+    The qoder storm of 2026-10-12 05:33 UTC produced 21 all_locked errors in
+    ~8 minutes and 17 of them were sub-100ms fail-fasts against 30s transient
+    locks -- the vendor cleared those locks itself within the same window
+    (5 successes interleaved) but the router never waited it out. This mirrors
+    the queueing an IDE client does (vendor contract 10605: retryAfterSeconds).
+
+    Rules: holding requires an opening inside the budget, and EVERY skip must
+    be a lock whose policy is transient -- never wait out quota, auth, or
+    anti-abuse locks, and never wait for skips that waiting cannot fix.
+    """
+    budget_ms = settings.get_int("routing.transient_hold_ms")
+    if budget_ms <= 0 or not skipped or opening is None:
+        return 0
+    wait_ms = opening - now_ms()
+    if wait_ms <= 0 or wait_ms > budget_ms:
+        return 0
+    for item in skipped:
+        reason = str(item.get("reason", ""))
+        if not reason.startswith("locked/"):
+            return 0  # sudah dicoba / kredensial kosong: nunggu gak akan nolong
+        if ":policy:transient" not in reason:
+            return 0  # lock beneran (quota/auth/anti-abuse): jangan pernah ditunggu
+    # ceil: bangun 1 detik lebih awal (floor) bikin re-pick masih terkunci --
+    # persis kegagalan yang ke-tangkap test_task77 2026-10-12
+    return max(1, (wait_ms + 999) // 1000)
+
+
 async def _dispatch(
     *, payload: dict[str, Any], definition: ProviderDef, model: str, trace: trace_mod.RequestTrace,
     api_key_id: str | None, stream: bool, record_health: bool = True,
@@ -233,11 +264,21 @@ async def _dispatch(
             reason = skipped[0]["reason"] if skipped else "this provider has no connections yet"
             message = f"no healthy connection: {reason}"
             opening = selector.next_opening_ms(skipped)
-            wait_s = max(1, (opening - now_ms()) // 1000) if opening else None
-            yield {"__error__": True, "message": message, "code": errors.CLASS_ALL_LOCKED,
-                   "status": 503, "upstream_status": None, "vendor_code": None,
-                   "retry_after": wait_s}
-            return
+            hold_s = _transient_hold_wait_s(skipped, opening)
+            if hold_s:
+                applog.debug(applog.NS_ROUTE,
+                             f"all candidates under short transient locks -- holding {hold_s}s, one re-pick",
+                             rid=trace.request_id)
+                await asyncio.sleep(hold_s)
+                chosen, skipped, plan = selector.pick(definition, model, exclude=excluded)
+                selector.log_plan(plan, chosen, skipped, rid=trace.request_id)
+            if chosen is None:
+                opening = selector.next_opening_ms(skipped) if skipped else None
+                wait_s = max(1, (opening - now_ms()) // 1000) if opening else None
+                yield {"__error__": True, "message": message, "code": errors.CLASS_ALL_LOCKED,
+                       "status": 503, "upstream_status": None, "vendor_code": None,
+                       "retry_after": wait_s}
+                return
 
         trace.bind_connection(chosen.credentials.connection_id)
         request = provider.build_request({**payload, "model": model}, chosen.credentials, stream=stream)

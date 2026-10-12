@@ -29,6 +29,10 @@ DEFAULTS: dict[str, tuple[Any, type, str]] = {
     "routing.per_provider": ({}, dict,
                              "{'<provider id>': {'strategy': 'round-robin', 'sticky_round_robin_limit': 1}}"),
     "routing.max_connections_per_request": (100, int, "how many candidates one request may iterate"),
+    "routing.transient_hold_ms": (25_000, int,
+                                  "when every candidate is skipped for a SHORT transient lock, hold the request "
+                                  "until the nearest lock expires (bounded by this budget) and re-pick once "
+                                  "instead of failing fast; 0 disables the hold"),
     # ── kesehatan koneksi (padanan config/errorConfig.js) ──
     "health.cooldown_auth_ms": (120_000, int, "401/402/403/404 -> how long to lock"),
     "health.cooldown_transient_ms": (30_000, int, "unclassified error: how long to lock"),
