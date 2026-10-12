@@ -16,6 +16,10 @@ credentials/
 # Runtime: database, logs, verification artifacts
 data/
 
+# Ops scripts (scripts/ops/): service stdout/stderr, watchdog journal,
+# restart request marker + launcher. Runtime state, never public.
+logs/
+
 # Private workbench -- RE notes, wire experiments, vendor data. Never public.
 knowledge/
 

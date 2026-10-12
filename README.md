@@ -50,7 +50,7 @@ Without `EROUTER_ADMIN_TOKEN` set on the server, every admin route answers 503.
 
 ## What is proven, and what is not
 
-* `python -m pytest -q` -> **100 tests, all offline** (httpx is stubbed; no vendor call, no
+* `python -m pytest -q` -> **165 tests, all offline** (httpx is stubbed; no vendor call, no
   credit spent). It covers the shared provider contract suite, the Anthropic translation in
   both directions, provider discovery from outside the package, schema migrations, the layer
   map, the language policy and the private-material guard.
