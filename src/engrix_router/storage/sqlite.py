@@ -29,7 +29,7 @@ from engrix_router.core import config
 _WRITE_LOCK = threading.Lock()
 _SCHEMA_READY = False
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Satu-satunya tempat ALTER ada. Aturan: ubah DDL = naikkin SCHEMA_VERSION + nambah
 # entri di sini, kalau gak: DB lama gak pernah nyusul dan perubahannya senyap.
@@ -38,6 +38,12 @@ MIGRATIONS: dict[int, list[str]] = {
     2: [
         "ALTER TABLE requests ADD COLUMN credits NUMERIC",
         "ALTER TABLE requests ADD COLUMN credits_original NUMERIC",
+    ],
+    3: [
+        # Snapshot terbaru per koneksi tanpa full scan (lihat catatan di schema.sql):
+        # query banner kuota dulu 19,98s dan ngeblok event loop. Aman dijalankan
+        # berulang karena IF NOT EXISTS.
+        "CREATE INDEX IF NOT EXISTS idx_quota_conn ON quota_snapshots(connection_id, fetched_at DESC)",
     ],
 }
 

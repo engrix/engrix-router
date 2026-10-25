@@ -148,12 +148,51 @@ def worst_remaining() -> dict[str, Any] | None:
     "newest" is per connection, not global: every connection is fetched at its own
     moment, so a global MAX(fetched_at) would only ever consider the last connection
     that was polled and hide a 0%-left row from an earlier one.
+
+    Shape matters more than it looks. This used to be the obvious correlated form
+        WHERE fetched_at = (SELECT MAX(q2.fetched_at) FROM quota_snapshots q2
+                            WHERE q2.connection_id = quota_snapshots.connection_id)
+    which no index can serve (idx_quota_live leads with `provider`), so SQLite ran a
+    full scan per outer row: 19.98s over 14,990 snapshots -- measured on the live DB,
+    while holding the event loop, which froze in-flight SSE streams. The window
+    function does one pass: 0.064s on the same rows, same answer. If you touch this
+    query, time it against a real database first.
     """
     rows = query(
         "SELECT provider, connection_id, scope, remaining, remaining_pct, reset_at, fetched_at"
-        " FROM quota_snapshots"
-        " WHERE fetched_at = (SELECT MAX(q2.fetched_at) FROM quota_snapshots q2"
-        "                     WHERE q2.connection_id = quota_snapshots.connection_id)"
-        " AND remaining_pct IS NOT NULL ORDER BY remaining_pct ASC LIMIT 1"
+        " FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY connection_id"
+        "                                  ORDER BY fetched_at DESC) AS rn"
+        "       FROM quota_snapshots WHERE remaining_pct IS NOT NULL)"
+        " WHERE rn = 1 ORDER BY remaining_pct ASC LIMIT 1"
     )
     return dict(rows[0]) if rows else None
+
+
+def latest_by_connection(provider: str | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Newest snapshot readings per connection, for the tracker + bulk actions.
+
+    Returns {connection_id: [readings...]} where the readings are the set stored at
+    that connection's most recent fetched_at. Bulk enable/disable ("turn off empty")
+    reads THIS, not a live vendor call: the operator just looked at the tracker, and
+    acting on a second, fresher read could disable an account that just refilled.
+
+    The window function is the same trick worst_remaining() documents (one pass,
+    indexed); see the timing note there before rewriting this.
+    """
+    params: tuple[Any, ...] = ()
+    where = ""
+    if provider:
+        where = "WHERE provider = ?"
+        params = (provider,)
+    rows = query(
+        "SELECT connection_id, provider, scope, used, total, remaining, remaining_pct,"
+        " unlimited, reset_at, fetched_at FROM ("
+        "  SELECT *, ROW_NUMBER() OVER (PARTITION BY connection_id"
+        "                           ORDER BY fetched_at DESC) AS rn"
+        "  FROM quota_snapshots " + where + ") WHERE rn = 1",
+        params,
+    )
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        out.setdefault(row["connection_id"], []).append(dict(row))
+    return out

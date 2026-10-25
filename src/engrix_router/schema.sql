@@ -247,6 +247,10 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (
   raw_json       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_quota_live ON quota_snapshots(provider, connection_id, fetched_at DESC);
+-- Per-connection "newest snapshot" lookups (health locks, quota banner). idx_quota_live
+-- leads with `provider`, so it cannot serve a WHERE that filters on connection_id
+-- alone -- that was a full scan per row (19.98s on 14,990 rows).
+CREATE INDEX IF NOT EXISTS idx_quota_conn ON quota_snapshots(connection_id, fetched_at DESC);
 
 -- Bucket anggaran harian (per provider|lane|api_key). Periode = YYYY-MM-DD UTC.
 CREATE TABLE IF NOT EXISTS budgets (

@@ -27,6 +27,9 @@ router = APIRouter(prefix="/api", tags=["observability"])
 
 _PERIODS = {"today": 0, "24h": 1, "7d": 7, "30d": 30, "60d": 60, "all": 3650}
 
+# Batas fetch kuota paralel: satu akun = satu koneksi keluar ke vendor.
+_QUOTA_FETCH_CONCURRENCY = 6
+
 
 def _since_ms(period: str) -> int:
     if period not in _PERIODS:
@@ -144,21 +147,37 @@ async def request_detail(request_id: str, include_payload: bool = Query(default=
 @router.get("/quota", dependencies=[Depends(deps.require_admin)])
 async def quota_list(provider: str | None = None, force: bool = False) -> dict[str, Any]:
     """Live quota per connection (cache TTL quota.ttl_s). A provider that does not
-    declare a usage spec reports available=False, never zero."""
+    declare a usage spec reports available=False, never zero.
+
+    Two things here are deliberate, both after measuring the old version at ~20s:
+
+    1. The database steps run in a worker thread. The dashboard polls this route on
+       every load, and synchronous SQLite calls on the event loop block every other
+       coroutine in the process -- including an SSE stream that is mid-answer.
+    2. Connections are fetched concurrently under a small semaphore instead of one
+       after another. Sequential awaits multiplied the vendor round-trip by the
+       account count (24 connections here), which is what made the page feel dead.
+       The cap keeps a 300-account list from opening 300 sockets at the vendor.
+    """
     from engrix_router.api.admin_connections import resolve_pair
     from engrix_router.accounts import connections
 
-    targets = connections.list_for_provider(provider, include_health=False)
-    results = []
-    for row in targets:
-        try:
-            definition, creds = resolve_pair(row["id"])
-        except HTTPException:
-            continue
-        reading = await limits.get_quota(registry.get_provider(definition.id), creds, force=force)
-        results.append({"connection_id": row["id"], "name": row["name"], "provider": row["provider"],
-                        **reading})
-    return {"providers": results, "worst": limits.worst_remaining()}
+    targets = await asyncio.to_thread(connections.list_for_provider, provider, include_health=False)
+    gate = asyncio.Semaphore(_QUOTA_FETCH_CONCURRENCY)
+
+    async def one(row: dict[str, Any]) -> dict[str, Any] | None:
+        async with gate:
+            try:
+                definition, creds = await asyncio.to_thread(resolve_pair, row["id"])
+            except HTTPException:
+                return None
+            reading = await limits.get_quota(registry.get_provider(definition.id), creds, force=force)
+            return {"connection_id": row["id"], "name": row["name"], "provider": row["provider"],
+                    **reading}
+
+    results = await asyncio.gather(*(one(row) for row in targets))
+    worst = await asyncio.to_thread(limits.worst_remaining)
+    return {"providers": [item for item in results if item is not None], "worst": worst}
 
 
 @router.get("/quota/history", dependencies=[Depends(deps.require_admin)])

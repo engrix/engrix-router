@@ -66,7 +66,12 @@ def test_migration_adds_the_new_columns_to_an_old_database(scratch_db):
 
     assert {"credits", "credits_original"} <= _columns(scratch_db, "requests")
     assert info["version"] == db.SCHEMA_VERSION
-    assert len(info["migrations_applied"]) == len(db.MIGRATIONS[2])
+    # DB-nya di-stamp v1, jadi SEMUA langkah v2..vN wajib jalan -- bukan cuma v2. Hitungan
+    # hardcoded ke MIGRATIONS[2] bikin tiap versi baru bikin tes ini merah padahal
+    # migrasinya benar.
+    expected = sum(len(statements) for version, statements in db.MIGRATIONS.items()
+                   if version > 1)
+    assert len(info["migrations_applied"]) == expected
 
 
 def test_migration_is_idempotent(scratch_db):
