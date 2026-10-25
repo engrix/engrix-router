@@ -15,12 +15,20 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from engrix_router.api import deps
-from engrix_router.accounts import catalog, connections, health
+from engrix_router.accounts import catalog, connections, health, limits
 from engrix_router.pipeline import runner
 from engrix_router.core.types import Credentials
 from engrix_router.providers import registry
 
 router = APIRouter(prefix="/api", tags=["providers"])
+
+# Kunci payload yang punya kolomnya sendiri di tabel connections. Sisanya adalah
+# metadata vendor dan disimpan di provider_specific -- lihat create_connection().
+_CONNECTION_FIELDS = frozenset({
+    "provider", "auth_type", "name", "email", "api_key", "access_token",
+    "refresh_token", "expires_at", "priority", "provider_specific",
+    "proxy_pool_id", "node_id", "is_active", "probe",
+})
 
 
 @router.get("/providers", dependencies=[Depends(deps.require_admin)])
@@ -79,6 +87,16 @@ async def create_connection(payload: dict[str, Any]) -> dict[str, Any]:
     definition = registry.get_definition(provider)
     if definition is None:
         raise HTTPException(400, f"provider '{provider}' is unknown; create a node first via /api/nodes")
+    # Setiap kunci yang tidak dikenali TETAP disimpan, di provider_specific.
+    # Dulu kunci seperti id_token / token_type / scope / account_id dibuang tanpa
+    # jejak, jadi operator mem-paste payload OAuth lengkap dan hanya sebagian yang
+    # sampai ke DB -- lalu bingung kenapa "paramnya kurang". Kolom baru tidak perlu:
+    # psd_json memang tempat metadata vendor, dan provider yang mengenal kuncinya
+    # membacanya dari sana.
+    provider_specific = dict(payload.get("provider_specific") or {})
+    for key, value in payload.items():
+        if key not in _CONNECTION_FIELDS and key not in provider_specific:
+            provider_specific[key] = value
     try:
         row = connections.create(
             provider=provider,
@@ -90,7 +108,7 @@ async def create_connection(payload: dict[str, Any]) -> dict[str, Any]:
             refresh_token=payload.get("refresh_token"),
             expires_at=payload.get("expires_at"),
             priority=payload.get("priority"),
-            provider_specific=payload.get("provider_specific") or {},
+            provider_specific=provider_specific,
             proxy_pool_id=payload.get("proxy_pool_id"),
             is_active=bool(payload.get("is_active", True)),
         )
@@ -120,7 +138,19 @@ async def get_connection(connection_id: str) -> dict[str, Any]:
 
 @router.patch("/connections/{connection_id}", dependencies=[Depends(deps.require_admin)])
 async def patch_connection(connection_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    row = connections.update(connection_id, payload)
+    # Sama seperti create: kunci yang tidak punya kolom sendiri TIDAK dibuang,
+    # melainkan masuk provider_specific. Operator yang mem-paste payload OAuth
+    # lengkap harus melihat semuanya tersimpan, bukan hanya yang kebetulan
+    # dikenali endpoint ini.
+    patch = dict(payload)
+    extra = {key: value for key, value in patch.items() if key not in _CONNECTION_FIELDS}
+    if extra:
+        merged = dict(patch.get("provider_specific") or {})
+        for key, value in extra.items():
+            merged.setdefault(key, value)
+            patch.pop(key, None)
+        patch["provider_specific"] = merged
+    row = connections.update(connection_id, patch)
     if row is None:
         raise HTTPException(404, "connection not found")
     return row
@@ -217,6 +247,68 @@ async def test_models(connection_id: str, payload: dict[str, Any] | None = None)
         state = None
     return {"provider": definition.id, "connection_id": connection_id, "results": results,
             **({"test_status": state["test_status"]} if state else {})}
+
+
+@router.post("/connections/bulk", dependencies=[Depends(deps.require_admin)])
+async def bulk_connections(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fleet-wide on/off in one call: activate, deactivate, activate_available,
+    deactivate_empty.
+
+    The quota-based actions judge from the NEWEST quota snapshot per connection
+    (accounts/limits.py: latest_by_connection), never from a live vendor call: the
+    operator just read those numbers on the tracker, and a second, fresher read
+    could switch off an account that refilled a minute ago. Connections without
+    any snapshot are reported as no_quota_data and left untouched -- silence is
+    not evidence of an empty account.
+
+    This is the "restart of the month" button: at quota reset the operator turns
+    every refilled account back on; when the fleet runs dry, one call parks the
+    empty ones instead of 369 clicks.
+    """
+    action = str(payload.get("action") or "")
+    provider = payload.get("provider") or None
+    if provider is not None:
+        provider = str(provider)
+    if action not in {"activate", "deactivate", "activate_available", "deactivate_empty"}:
+        raise HTTPException(400, "action must be one of "
+                                 "activate|deactivate|activate_available|deactivate_empty")
+    rows = connections.list_for_provider(provider, include_health=False)
+    if not rows:
+        return {"action": action, "provider": provider, "total": 0, "changed": 0,
+                "unchanged": 0, "no_quota_data": 0}
+
+    want: dict[str, bool] = {}
+    no_quota_data = 0
+    if action in ("activate", "deactivate"):
+        flag = action == "activate"
+        for row in rows:
+            want[row["id"]] = flag
+    else:
+        latest = limits.latest_by_connection(provider)
+        for row in rows:
+            readings = latest.get(row["id"]) or []
+            if not readings:
+                no_quota_data += 1
+                continue
+            available = any(
+                reading["unlimited"]
+                or (reading["remaining"] is not None and float(reading["remaining"]) > 0)
+                for reading in readings
+            )
+            if action == "activate_available" and available:
+                want[row["id"]] = True
+            elif action == "deactivate_empty" and not available:
+                want[row["id"]] = False
+
+    changed = 0
+    for connection_id, flag in want.items():
+        current = next((row for row in rows if row["id"] == connection_id), None)
+        if current is None or bool(current["is_active"]) == flag:
+            continue
+        if connections.update(connection_id, {"is_active": flag}) is not None:
+            changed += 1
+    return {"action": action, "provider": provider, "total": len(rows), "changed": changed,
+            "unchanged": max(0, len(rows) - changed - no_quota_data), "no_quota_data": no_quota_data}
 
 
 def resolve_pair(connection_id: str) -> tuple[Any, Credentials]:

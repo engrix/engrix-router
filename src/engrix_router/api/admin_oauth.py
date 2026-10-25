@@ -49,10 +49,21 @@ def _prune() -> None:
         _SESSIONS.pop(key, None)
 
 
-def _require_hook(provider: Any, name: str) -> Any:
+def _require_hook(provider: Any, name: str, provider_id: str) -> Any:
+    """Return the provider hook ``name``, or refuse with 409 when it has none.
+
+    ``provider_id`` is passed in rather than read off the instance: BaseProvider
+    carries a ``definition`` object, not a bare ``.id``. Reading ``.id`` here
+    raised AttributeError, so the guard whose whole job is to say "this provider
+    has no browser link" answered 500 instead of 409 -- every provider declaring
+    category="oauth" without shipping the hooks hit exactly that case.
+    """
     hook = getattr(provider, name, None)
     if hook is None:
-        raise HTTPException(409, f"provider '{provider.id}' does not support OAuth linking")
+        # # provider_id dioper, bukan dibaca dari instance: BaseProvider cuma
+        # # punya .definition, jadi provider.id = AttributeError -> 500, padahal
+        # # guard ini ada justru buat menjawab 409.
+        raise HTTPException(409, f"provider '{provider_id}' does not support OAuth linking")
     return hook
 
 
@@ -66,7 +77,7 @@ async def start_link(provider_id: str) -> dict[str, Any]:
     if definition.category != "oauth":
         raise HTTPException(409, f"provider '{provider_id}' is not an OAuth provider")
     provider = registry.get_provider(definition.id)
-    hook = _require_hook(provider, "oauth_start")
+    hook = _require_hook(provider, "oauth_start", definition.id)
     try:
         flow = await hook()
     except HTTPException:
@@ -109,7 +120,7 @@ async def poll_link(provider_id: str, session_id: str) -> dict[str, Any]:
         # # ke vendor -- pola 9router interval di-hammer, kita hormati interval.
         return {"status": "pending", "retry_after_ms": session["poll_after_ms"] - _now_ms()}
     provider = registry.get_provider(provider_id)
-    hook = _require_hook(provider, "oauth_poll")
+    hook = _require_hook(provider, "oauth_poll", provider_id)
     try:
         result = await hook(session["flow_token"])
     except Exception as exc:

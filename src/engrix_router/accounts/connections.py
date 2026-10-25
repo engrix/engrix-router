@@ -24,6 +24,7 @@ from engrix_router.accounts import health
 from engrix_router.transport import proxy
 from engrix_router.core.types import Candidate, Credentials, ProviderDef
 from engrix_router.core.ids import new_id
+from engrix_router.core import tokens
 
 SAFE_CRED_KEYS = frozenset({"redacted": True})
 # Kunci yang boleh dibaca dashboard dari cred_json.
@@ -40,6 +41,27 @@ def _load(text: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _derive_from_token(claims: dict[str, Any]) -> dict[str, Any]:
+    """psd fields the token itself already answers.
+
+    Kept separate from the operator's provider_specific blob so an import or a
+    dashboard edit cannot silently drop them: `uid` is what the desktop client
+    sends as its account header, and `token_claims` is the audit trail that makes
+    "why did this account stop working" answerable without re-deriving the JWT.
+    """
+    derived: dict[str, Any] = {}
+    subject = tokens.subject(claims)
+    if subject:
+        derived["uid"] = subject
+    issued = tokens.issued_iso(claims)
+    if issued:
+        derived["token_issued_at"] = issued
+    summary = tokens.public_summary(claims)
+    if summary:
+        derived["token_claims"] = summary
+    return derived
 
 
 def next_priority(provider: str) -> int:
@@ -70,13 +92,21 @@ def create(
     if auth_type == "oauth" and not access_token:
         raise ValueError("auth_type=oauth requires an access_token")
     connection_id = new_id()
+    # Token diperiksa SEBELUM disimpan: bentuk komposit "<akun>+<jwt>" dipecah,
+    # lalu expires_at dan identitas diambil dari claim-nya sendiri. Tanpa langkah
+    # ini setiap akun OAuth masuk DB dengan expires_at NULL -- dan pemeriksaan
+    # kedaluwarsa tidak akan pernah bisa jalan (lihat Credentials.is_expired).
+    bare_token, claims = tokens.normalise(access_token)
+    psd = dict(provider_specific or {})
+    derived = _derive_from_token(claims)
+    for key, value in derived.items():
+        psd.setdefault(key, value)
     cred = {
         "api_key": api_key,
-        "access_token": access_token,
+        "access_token": bare_token or access_token,
         "refresh_token": refresh_token,
-        "expires_at": expires_at,
+        "expires_at": expires_at or tokens.expiry_iso(claims),
     }
-    psd = dict(provider_specific or {})
     resolved_priority = int(priority) if priority is not None else next_priority(provider)
     with transaction() as db:
         db.execute(
@@ -110,20 +140,37 @@ def update(connection_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
     cred = _load(existing["cred_json"])
     psd = _load(existing["psd_json"])
     cred_touched = False
+    psd_touched = False
+    # Token yang di-paste ulang harus diperlakukan sama seperti saat create():
+    # dipecah dari bentuk komposit, lalu expires_at dan identitas diambil dari
+    # claim. Tanpa ini, "Edit → paste token baru" akan tetap menyimpan
+    # expires_at lama yang sudah basi.
+    if patch.get("access_token"):
+        bare_token, claims = tokens.normalise(patch["access_token"])
+        patch = {**patch, "access_token": bare_token or patch["access_token"]}
+        for key, value in _derive_from_token(claims).items():
+            if value not in (None, {}, ""):
+                psd[key] = value
+                psd_touched = True
+        if not patch.get("expires_at"):
+            derived_expiry = tokens.expiry_iso(claims)
+            if derived_expiry:
+                patch = {**patch, "expires_at": derived_expiry}
     for key in ("api_key", "access_token", "refresh_token", "expires_at"):
         if key in patch and patch[key] is not None:
             cred[key] = patch[key]
             cred_touched = True
     if isinstance(patch.get("provider_specific"), dict):
         psd.update(patch["provider_specific"])  # shallow merge, sama seperti 9router
-    if columns or cred_touched or isinstance(patch.get("provider_specific"), dict):
+        psd_touched = True
+    if columns or cred_touched or psd_touched:
         columns["updated_at"] = now_iso()
         sets = ", ".join(f"{key} = ?" for key in columns)
         params = list(columns.values())
         if cred_touched:
             params.append(_dump(cred))
             sets += ", cred_json = ?"
-        if isinstance(patch.get("provider_specific"), dict):
+        if psd_touched:
             params.append(_dump(psd))
             sets += ", psd_json = ?"
         params.append(connection_id)
@@ -147,6 +194,12 @@ def delete(connection_id: str) -> bool:
 def _public_view(row: dict[str, Any]) -> dict[str, Any]:
     cred = _load(row.get("cred_json"))
     psd = _load(row.get("psd_json"))
+    # Baris lama (hasil migrasi 9router) menyimpan token tanpa expires_at.
+    # Tanggalnya tetap bisa dijawab token itu sendiri, jadi dashboard tidak perlu
+    # menampilkan "kosong" untuk akun yang sebenarnya punya masa berlaku jelas.
+    expires_at = cred.get("expires_at")
+    if not expires_at:
+        expires_at = tokens.expiry_iso(tokens.decode_claims(cred.get("access_token")))
     return {
         "id": row["id"],
         "provider": row["provider"],
@@ -163,7 +216,7 @@ def _public_view(row: dict[str, Any]) -> dict[str, Any]:
         # marker, bukan nilai: dashboard boleh tau "ada key-nya" dan kapan mati.
         "has_api_key": bool(cred.get("api_key")),
         "has_access_token": bool(cred.get("access_token")),
-        "expires_at": cred.get("expires_at"),
+        "expires_at": expires_at,
     }
 
 
@@ -196,6 +249,11 @@ def load_credentials(connection_id: str) -> Credentials | None:
         return None
     cred = _load(row["cred_json"])
     token = cred.get("access_token") or cred.get("api_key") or ""
+    # Baris hasil migrasi lama tidak punya expires_at. Tanggalnya tetap bisa
+    # dibaca dari token, jadi pemeriksaan kedaluwarsa tidak perlu menunggu
+    # sampai baris itu ditulis ulang -- tanpa ini, akun dengan token basi
+    # selamanya dianggap hidup dan baru ketahuan setelah vendor menolak.
+    expires_at = cred.get("expires_at") or tokens.expiry_iso(tokens.decode_claims(token))
     proxy_url, strict = proxy.resolve(row["proxy_pool_id"], _load(row["psd_json"]))
     return Credentials(
         connection_id=row["id"],
@@ -204,7 +262,7 @@ def load_credentials(connection_id: str) -> Credentials | None:
         name=row["name"] or row["email"] or row["id"][:8],
         token=token or None,
         refresh_token=cred.get("refresh_token"),
-        expires_at=cred.get("expires_at"),
+        expires_at=expires_at,
         psd=_load(row["psd_json"]),
         proxy_url=proxy_url,
         proxy_strict=strict,
@@ -290,3 +348,30 @@ def usage_summary(connection_id: str, *, days: int = 7) -> dict[str, Any]:
         (connection_id, days),
     )
     return dict(row) if row else {"requests": 0, "tokens": 0, "cost": 0, "last_ts": None}
+
+
+def export_rows() -> list[dict[str, Any]]:
+    """Every connection WITH its credentials, for the backup file.
+
+    Dashboard views are stripped by design (SAFE_CRED_KEYS / _public_view); this
+    is the one read path that must carry secrets, because the document it feeds
+    is the only thing that survives a reinstall with the fleet intact. It is
+    reachable exclusively through the admin API (fail-closed without a token) and
+    is never written to a log line.
+
+    Field names follow the connection row plus a flattened credential block, so
+    a restore can round-trip through create()/update() without guessing.
+    """
+    out: list[dict[str, Any]] = []
+    for row in query("SELECT * FROM connections ORDER BY provider, priority, created_at"):
+        item = dict(row)
+        cred = _load(item.pop("cred_json", None))
+        psd = _load(item.pop("psd_json", None))
+        item["api_key"] = cred.get("api_key")
+        item["access_token"] = cred.get("access_token")
+        item["refresh_token"] = cred.get("refresh_token")
+        item["expires_at"] = cred.get("expires_at")
+        item["provider_specific"] = psd
+        item["is_active"] = bool(item.get("is_active", 1))
+        out.append(item)
+    return out
