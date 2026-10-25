@@ -132,7 +132,9 @@ def test_budget_ke_per_class_bukan_kelas_rate_limit():
 def test_pricings_blocked_kelas_model_lock():
     c = errors.classify(status=403, text='{"code":"112","message":"{\"pricingUrl\":\"https://qoder.com/pricing\"}"}')
     assert c.error_class == errors.CLASS_PRICING_BLOCKED
-    assert c.policy.lock == "model" and not c.policy.retry_internally
+    # Lock tetap per-model (akun ini belum bayar), tapi request BOLEH pindah akun:
+    # akun lain di fleet yang sudah punya plan masih bisa melayani.
+    assert c.policy.lock == "model" and c.policy.retry_internally
 
 
 # ── 3. routing ───────────────────────────────────────────────────────────────
