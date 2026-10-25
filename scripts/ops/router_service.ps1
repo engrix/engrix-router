@@ -133,7 +133,18 @@ function Uninstall-Autostart {
 switch ($Command.ToLower()) {
   "start"              { if (Start-Router) { exit 0 } else { exit 1 } }
   "stop"               { if (Stop-Router) { exit 0 } else { exit 1 } }
-  "restart"            { [void](Stop-Router); Start-Sleep -Seconds 2; if (Start-Router) { exit 0 } else { exit 1 } }
+  # Restart is delegated to scripts/ops/router_restart.py so there is exactly
+  # ONE implementation of "stop, prove the port is free, start, wait for
+  # /health". The old inline version ignored Stop-Router's result: when the
+  # port did not free in 20s, Start-Router saw it bound, printed "already
+  # running" and exited 0 -- a false success while the old process kept
+  # running. The helper also writes logs/restart-journal.json so the dashboard
+  # can show the real stage and reason.
+  "restart"            {
+                          $helper = Join-Path $RouterRoot "scripts\ops\router_restart.py"
+                          & $PythonExe -u $helper --root $RouterRoot --port $Port
+                          exit $LASTEXITCODE
+                       }
   "status"             { Show-Status; exit 0 }
   "install-autostart"  { Install-Autostart; exit 0 }
   "uninstall-autostart"{ Uninstall-Autostart; exit 0 }
