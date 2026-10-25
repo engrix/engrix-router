@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from engrix_router.core import config
 from engrix_router.storage import sqlite as db
 from engrix_router.api import (
+    admin_backup,
     admin_connections,
     admin_keys,
     admin_nodes,
@@ -108,6 +109,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_keys.router)
     app.include_router(admin_nodes.router)
     app.include_router(admin_connections.router)
+    app.include_router(admin_backup.router)
     app.include_router(admin_oauth.router)
     app.include_router(admin_proxy.router)
     app.include_router(admin_observability.router)
