@@ -43,9 +43,15 @@ CLASS_MODEL_NOT_FOUND = "model_not_found"
 CLASS_RATE_LIMIT = "rate_limited"
 CLASS_MODEL_CONCURRENCY = "model_concurrency"  # vendor code 3009: 1 slot per model, bukan salah kita
 CLASS_QUOTA_DAILY = "quota_daily"          # vendor code 110: habis hari ini
+CLASS_NO_PLAN = "no_plan"                  # zcode: login sukses, plan tidak pernah di-grant
 CLASS_PRICING_BLOCKED = "pricing_blocked"  # vendor code 112 + pricingUrl
 CLASS_QUEUE_THROTTLED = "queue_throttled"  # vendor code 10605
 CLASS_ANTI_ABUSE = "anti_abuse_shape"      # vendor code 3012: bentuk body ditolak edge
+# Akun diblokir vendor (codebuddy code 11140): token sah, akunnya yang
+# dibatasi karena "unusual activity". Re-login TIDAK menyembuhkan -- yang
+# bisa memulihkan cuma banding ke vendor, jadi kelas ini terpisah dari
+# credential_dead supaya dashboard tidak menyuruh orang mengulang login.
+CLASS_ACCOUNT_RESTRICTED = "account_restricted"
 CLASS_CREDENTIAL_DEAD = "credential_dead"  # 401/403 dari upstream = token kita mati
 CLASS_PROTOCOL_DRIFT = "protocol_drift"    # signature invalid / replay 103
 CLASS_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
@@ -64,9 +70,11 @@ ALL_CLASSES = (
     CLASS_RATE_LIMIT,
     CLASS_MODEL_CONCURRENCY,
     CLASS_QUOTA_DAILY,
+    CLASS_NO_PLAN,
     CLASS_PRICING_BLOCKED,
     CLASS_QUEUE_THROTTLED,
     CLASS_ANTI_ABUSE,
+    CLASS_ACCOUNT_RESTRICTED,
     CLASS_CREDENTIAL_DEAD,
     CLASS_PROTOCOL_DRIFT,
     CLASS_UPSTREAM_UNAVAILABLE,
@@ -107,12 +115,36 @@ class Policy:
     retry_after_s: int | None
 
 
+# ── kontrak retry: GLOBAL, bukan per-provider ────────────────────────────────
+# Setiap kegagalan yang datang dari upstream -- status HTTP apa pun, kegagalan
+# transport, maupun kelas yang tidak dikenal -- WAJIB boleh pindah akun. Satu
+# request tidak boleh mati di akun pertama selama masih ada koneksi lain yang
+# belum dicoba. Ini permintaan owner ("sticky 1: begitu ada error, langsung ganti
+# akun") dan juga perilaku 9router lewat accountFallback.js:checkFallbackError.
+#
+# Yang TETAP tidak boleh retry hanya kelas-kelas di bawah, dan alasannya bukan
+# selera:
+#   * client_no_key / client_bad_key -- autentikasi ke GATEWAY ini; tidak ada
+#     akun upstream yang terlibat sama sekali.
+#   * budget_exceeded -- keputusan budget kita sendiri; akun lain tidak menambah
+#     jatah token.
+#   * all_locked -- justru tanda tidak ada kandidat yang tersisa.
+#   * aborted -- klien yang membatalkan request-nya.
+#   * stream_stalled -- byte pertama sudah sampai ke klien, status 200 sudah
+#     dikirim; mengganti akun di tengah stream = mengarang respons.
+#   * protocol_drift -- trip ini GLOBAL (health.drift_until_ms), bukan per akun.
+#
+# Kolom `lock` sengaja TIDAK ikut diubah: "boleh pindah akun" dan "akun ini
+# rusak" adalah dua keputusan berbeda. 400/404/422 itu salah bentuk payload atau
+# model tidak ada -- akunnya sendiri tetap sehat, jadi lock="none". Kalau semua
+# kelas ikut mengunci akun, satu body yang salah akan menghabiskan seluruh fleet
+# (self-DoS) -- itu yang dijaga health.lock_plain_4xx.
 _POLICIES: dict[str, Policy] = {
-    CLASS_CLIENT_BAD_REQUEST: Policy(400, "none", False, False, None),
+    CLASS_CLIENT_BAD_REQUEST: Policy(400, "none", True, False, None),
     CLASS_CLIENT_NO_KEY: Policy(401, "none", False, False, None),
     CLASS_CLIENT_BAD_KEY: Policy(401, "none", False, False, None),
-    CLASS_MODEL_NOT_FOUND: Policy(404, "none", False, True, None),
-    CLASS_RATE_LIMIT: Policy(429, "backoff", False, True, 15),
+    CLASS_MODEL_NOT_FOUND: Policy(404, "none", True, True, None),
+    CLASS_RATE_LIMIT: Policy(429, "backoff", True, True, 15),
     # 3009 ZCode: akun hanya boleh 1 request GLM bersamaan. Ini BUKAN hukuman
     # buat akun: kunci cuma model itu, beberapa detik, lalu boleh dicoba lagi.
     # Kalau digabung ke rate_limited, backoff eksponensial ngunci 1 akun sehat
@@ -122,13 +154,24 @@ _POLICIES: dict[str, Policy] = {
     # berhenti di sini = klien mati padahal ada akun sehat di baris berikutnya --
     # jadi boleh pindah koneksi (koneksi yang habis udah ke-lock sendiri).
     CLASS_QUOTA_DAILY: Policy(503, "quota_window", True, True, None),
-    CLASS_PRICING_BLOCKED: Policy(503, "model", False, False, 3600),
+    # ZCode no_plan: token hidup, server memang tidak pernah memberi plan
+    # (billing balances=[]/plans=[] pada akun yang sama). Bukan kuota harian --
+    # kunci akun pendek; pemulihannya di sisi vendor (grant), bukan retry router.
+    CLASS_NO_PLAN: Policy(503, "auth", True, True, 3600),
+    CLASS_PRICING_BLOCKED: Policy(503, "model", True, False, 3600),
     CLASS_QUEUE_THROTTLED: Policy(429, "short", True, True, 8),
     # 3012 ZCode: edge menolak BENTUK body. Yang salah request-nya, bukan akunnya,
     # dan tidak ada jendela harian yang perlu ditunggu (TASK-48) -- kunci model itu
     # sebentar, akun tetap layak dicoba, klien dapat Retry-After pendek.
-    CLASS_ANTI_ABUSE: Policy(503, "anti_abuse", False, True, 120),
-    CLASS_CREDENTIAL_DEAD: Policy(503, "auth", False, True, 120),
+    CLASS_ANTI_ABUSE: Policy(503, "anti_abuse", True, True, 120),
+    # 11140: akunnya diblokir vendor, bukan token busuk dan bukan body salah.
+    # lock "restricted" mengunci AKUN untuk jendela panjang (default 1 jam) dan
+    # statusnya cooling -- jadi begitu vendor mencabut blokir, akun kembali
+    # sendiri. credential_dead sengaja tidak dipakai: status needs_reauth
+    # adalah pintu satu arah (tidak ada self-heal), sehingga 9 akun yang kena
+    # gelombang blokir akan mati permanen di router walau bandingnya diterima.
+    CLASS_ACCOUNT_RESTRICTED: Policy(503, "restricted", True, True, 3600),
+    CLASS_CREDENTIAL_DEAD: Policy(503, "auth", True, True, 120),
     CLASS_PROTOCOL_DRIFT: Policy(502, "drift", False, True, None),
     CLASS_UPSTREAM_UNAVAILABLE: Policy(503, "transient", True, True, None),
     CLASS_UPSTREAM_TIMEOUT: Policy(504, "transient", True, True, None),
@@ -136,7 +179,7 @@ _POLICIES: dict[str, Policy] = {
     CLASS_BUDGET_EXCEEDED: Policy(429, "none", False, False, 3600),
     CLASS_ALL_LOCKED: Policy(503, "none", False, False, None),
     CLASS_ABORTED: Policy(499, "none", False, False, None),
-    CLASS_UNKNOWN: Policy(502, "transient", False, True, None),
+    CLASS_UNKNOWN: Policy(502, "transient", True, True, None),
 }
 
 
@@ -195,6 +238,22 @@ _BILLING_TEXT_RE = re.compile(r"billing|daily usage limit|usage limit for chat",
 _QUOTA_TEXT_RE = re.compile(r"exceed quota limit|quota limit exceeded", re.I)
 _EXPIRED_TOKEN_RE = re.compile(r"login expired|token (?:expired|invalid)|invalid_grant", re.I)
 _UNUSUAL_ACTIVITY_RE = re.compile(r"unusual activity", re.I)
+# Kalimat lengkap displayMsg codebuddy, BUKAN frasa "unusual activity" milik
+# ZCode (3012/HTTP 405) yang artinya beda: di sana yang ditolak bentuk body,
+# di sini yang dibatasi akunnya.
+_ACCOUNT_RESTRICTED_RE = re.compile(
+    r"account has been restricted|restricted due to unusual activity|"
+    r"\u8d26\u53f7\u5b58\u5728\u5f02\u5e38\u884c\u4e3a",
+    re.I,
+)
+# base.py:193 dan :283 membungkus SEMUA kegagalan httpx sebagai
+# "transport error: <Class>: <detail>". Pola ini jadi bukti yang bisa dipakai
+# walau pemanggil lupa mengirim exception_name.
+_TRANSPORT_TEXT_RE = re.compile(
+    r"transport error|connecterror|remoteprotocolerror|readerror|connecttimeout|"
+    r"getaddrinfo failed|server disconnected without sending a response",
+    re.I,
+)
 
 
 def _next_utc_midnight(now: datetime | None = None) -> datetime:
@@ -202,7 +261,7 @@ def _next_utc_midnight(now: datetime | None = None) -> datetime:
     return (base + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-_SPECIAL_CODES = {"103", "110", "112", "10605", "3012", "1005"}
+_SPECIAL_CODES = {"103", "110", "112", "10605", "3012", "1005", "11140"}
 
 
 def classify_vendor_code(raw: str | None) -> str | None:
@@ -225,6 +284,36 @@ def classify_vendor_code(raw: str | None) -> str | None:
         if code in _SPECIAL_CODES:
             return code
     return matches[0]
+
+
+# Runner meneruskan `UpstreamError.kind` ke sini (runner.py:382) -- itu kosakata
+# milik sendiri ("transport" / "stalled" / "timeout" / "http"), BUKAN nama class
+# httpx. Selama set ini cuma kenal nama httpx, semua kegagalan transport jatuh ke
+# class=unknown, yang policy-nya retry_internally=False: satu request mati di
+# akun PERTAMA padahal sisa fleet sehat. Terukur di log 2026-10-25: 440 event
+# class=unknown (bucket terbesar kedua), semuanya ConnectError / ReadError /
+# RemoteProtocolError / ConnectTimeout. Sekarang dua kosakata itu diterima.
+TRANSPORT_EXCEPTION_NAMES = frozenset({
+    # httpx exception class names
+    "ConnectError", "ConnectTimeout", "RemoteProtocolError", "ReadError",
+    "ReadTimeout", "WriteError", "WriteTimeout", "PoolTimeout", "NetworkError",
+    # UpstreamError.kind
+    "transport", "stalled",
+})
+
+
+# Kelas yang salahnya ada di REQUEST, bukan di akun: body salah bentuk, model
+# tidak ada, parameter tidak didukung. Akun mana pun akan menolaknya dengan cara
+# yang sama, jadi memindah akun tidak bisa menghasilkan jawaban berbeda.
+#
+# Kelas-kelas ini TETAP boleh retry (satu akun bisa punya plan/model berbeda),
+# tapi runner membatasi jumlah akun yang boleh dicoba -- lihat
+# routing.request_scoped_attempts. Tanpa batas itu, satu body rusak akan
+# menghukum ratusan akun sehat dalam satu request (self-DoS).
+REQUEST_SCOPED_CLASSES = frozenset({
+    CLASS_CLIENT_BAD_REQUEST,
+    CLASS_MODEL_NOT_FOUND,
+})
 
 
 def classify(
@@ -279,6 +368,12 @@ def classify(
     # bacanya dari sana. reset_at=None = "tanyain ke meteran".
     if code == "1005" or _QUOTA_TEXT_RE.search(lowered):
         return make(CLASS_QUOTA_DAILY, body or "upstream says the quota limit is reached")
+    # 2c) ZCode no_plan: billing/balance answers 200 dengan balances=[] untuk
+    # akun yang login-nya sukses tapi plan start-nya tidak pernah di-grant
+    # vendor (kebijakan sisi server sejak ~2026-10-18 -- billing/current
+    # plans=[] pada akun yang sama; bukan bug flow, re-link tidak menyembuhkan).
+    if code == "no_plan":
+        return make(CLASS_NO_PLAN, body or "upstream account has no granted plan")
     # 3) model dibayar/di-throttle per model (kode 112 + pricingUrl).
     if code == "112" or _PRICING_URL_RE.search(lowered):
         return make(CLASS_PRICING_BLOCKED, body or "this model requires a paid plan", retry_after_s=3600)
@@ -304,6 +399,12 @@ def classify(
     # quota_daily kelas ini dulu mengunci '*' sampai UTC midnight: satu body yang
     # bentuknya salah mematikan dua akun 6 jam penuh. Perbaikan bentuknya di adapter
     # (zcode._seed_shape), bukan di sini.
+    # 5c) akun DIBLOKIR vendor (codebuddy 11140): token sah, akunnya dibatasi.
+    # Dicek SEBELUM aturan anti-abuse supaya kalimat "unusual activity" milik
+    # codebuddy tidak tertukar dengan penolakan bentuk body milik ZCode.
+    if code == "11140" or _ACCOUNT_RESTRICTED_RE.search(lowered):
+        return make(CLASS_ACCOUNT_RESTRICTED, body or "vendor restricted this account",
+                    retry_after_s=3600)
     if code == "3012" or _UNUSUAL_ACTIVITY_RE.search(lowered):
         return make(CLASS_ANTI_ABUSE, body or "upstream rejected the request shape")
     # 6) kredensial mati (401/403 tanpa tanda billing) -> jangan 403 ke klien.
@@ -318,8 +419,14 @@ def classify(
     # 9) timeout/transport.
     if exception_name and ("timeout" in exception_name.lower() or "timed out" in lowered):
         return make(CLASS_UPSTREAM_TIMEOUT, body or f"timeout: {exception_name}")
-    if exception_name in {"ConnectError", "RemoteProtocolError", "ReadError", "PoolTimeout"}:
+    if exception_name in TRANSPORT_EXCEPTION_NAMES:
         return make(CLASS_UPSTREAM_UNAVAILABLE, body or f"transport error: {exception_name}")
+    # Kegagalan yang sama kalau pemanggil cuma punya pesannya: base.py:193
+    # membungkus SEMUA error httpx sebagai "transport error: <Class>: <detail>",
+    # jadi teksnya sendiri sudah bukti yang sah. Tanpa ini, pemanggil yang lupa
+    # mengirim exception_name turun diam-diam ke class=unknown (tanpa failover).
+    if _TRANSPORT_TEXT_RE.search(lowered):
+        return make(CLASS_UPSTREAM_UNAVAILABLE, body or "transport error")
     # 10) 5xx.
     if status and 500 <= status <= 599:
         return make(CLASS_UPSTREAM_UNAVAILABLE, body or f"upstream {status}")

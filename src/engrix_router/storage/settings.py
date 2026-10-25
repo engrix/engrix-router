@@ -24,11 +24,20 @@ SETTINGS_VERSION = 1
 # dan supaya gak ada tabrakan antar-subsystem.
 DEFAULTS: dict[str, tuple[Any, type, str]] = {
     # ── routing strategy (padanan settings.fallbackStrategy 9router) ──
-    "routing.strategy": ("fill-first", str, "fill-first | round-robin | least-recent"),
-    "routing.sticky_round_robin_limit": (3, int, "how many consecutive requests stick to the same account"),
+    # Strategi 9router di VPS owner: round-robin global + sticky_limit=1, yang di
+    # implementasi itu = round-robin murni -- tiap request mendarat di akun paling
+    # lama nganggur, bukan di akun yang barusan dipakai. Itu intinya: fill-first
+    # bikin akun prioritas terkecil menanggung SEMUA request sampai rusak, jadi
+    # satu akun jelek kelihatan seperti provider yang mati.
+    "routing.strategy": ("round-robin", str, "fill-first | round-robin | least-recent"),
+    "routing.sticky_round_robin_limit": (1, int, "how many consecutive requests stick to the same account"),
     "routing.per_provider": ({}, dict,
                              "{'<provider id>': {'strategy': 'round-robin', 'sticky_round_robin_limit': 1}}"),
     "routing.max_connections_per_request": (100, int, "how many candidates one request may iterate"),
+    "routing.request_scoped_attempts": (3, int,
+                                        "how many accounts one request may try when the error blames the "
+                                        "REQUEST (400/404: malformed body, unknown model) -- every account "
+                                        "rejects the same body, so this caps the blast radius"),
     "routing.transient_hold_ms": (25_000, int,
                                   "when every candidate is skipped for a SHORT transient lock, hold the request "
                                   "until the nearest lock expires (bounded by this budget) and re-pick once "
@@ -41,6 +50,11 @@ DEFAULTS: dict[str, tuple[Any, type, str]] = {
                                       "anti-abuse rejection (ZCode 3012): how long to lock that model only, account stays usable"),
     "health.backoff_base_ms": (2_000, int, "rate limit: 2^level * base"),
     "health.backoff_max_ms": (300_000, int, "cap backoff rate limit"),
+    # Vendor memblokir akun (codebuddy 11140). 1 jam: cukup lama untuk berhenti
+    # membuang request ke akun yang di-ban, cukup pendek untuk pulih sendiri
+    # kalau bandingnya diterima. Bukan needs_reauth -- re-login tidak menolong.
+    "health.cooldown_restricted_ms": (3_600_000, int,
+                                      "vendor-blocked account: how long to lock"),
     "health.backoff_max_level": (15, int, "cap level backoff"),
 "health.quota_reset_horizon_ms": (7 * 86_400_000, int,
                                   "cap the reset horizon taken from a vendor meter; vendor sentinels (year 9999) die here"),
@@ -61,6 +75,11 @@ DEFAULTS: dict[str, tuple[Any, type, str]] = {
     "health.drift_reason": ("", str, "reason for the drift trip, shown in the dashboard"),
     # ── error mapping ke klien (kontrak engrix-agent) ──
     "client.retry_after_default_s": (15, int, "Retry-After for 429/503 when the vendor gives no hint"),
+    # SSE keepalive: selama upstream diam (model lagi mikir), kirim komentar tiap N
+    # detik supaya client/proxy gak nganggep stream mati. Isi jawaban gak disentuh.
+    "stream.keepalive_s": (15, int,
+                           "SSE comment every N seconds of upstream silence so a thinking model "
+                           "does not look like a dead stream; 0 disables"),
     # ── cache ──
     "catalog.ttl_s": (3600, int, "cache /models per connection"),
     "quota.ttl_s": (30, int, "cache a quota snapshot this long before calling the vendor again"),

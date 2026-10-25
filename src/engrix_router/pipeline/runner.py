@@ -106,16 +106,22 @@ async def _admission(*, provider: str, api_key_id: str | None, body: dict[str, A
 
 def _sleep_before_retry(classified: errors.Classified, definition: ProviderDef) -> float:
     """
-    Short pause before moving to another connection.
+    Pause before moving to another connection -- always zero.
 
-    We do NOT sleep for the vendor's Retry-After (that can be 15 minutes) -
-    that belongs to health/lock state, not to blocking the event loop.
+    This used to wait min(Retry-After, 1s) before switching accounts, which is
+    the wrong trade: once the decision to move on is made, waiting fixes
+    nothing. The next account is a DIFFERENT account with its own quota and its
+    own connectivity, so the only thing the sleep buys is latency -- up to one
+    second per failed account, which on a 100-connection fleet is 100 seconds
+    burned before the request ever reaches the last candidate.
 
+    The vendor's Retry-After is still honoured through health state: the account
+    that just failed is not selectable again until its lock expires, so there is
+    nothing to wait for here.
+
+    Signature kept so existing callers and tests need no change.
     """
-    if classified.retry_after_s is not None:
-        return min(float(classified.retry_after_s), 1.0)
-    spec = definition.transport.retry.get(classified.client_status)
-    return min(spec.delay_ms, 1000) / 1000.0 if spec else 0.0
+    return 0.0
 
 
 def _chunk_for_client(frame: dict[str, Any], *, request_id: str, model: str, created: int) -> dict[str, Any]:
@@ -237,9 +243,13 @@ async def _dispatch(
     concurrency_retries = 0
     bytes_sent = False  # TASK-70: cascade breaker hanya fail-fast sebelum byte pertama
     max_attempts = max(1, settings.get_int("routing.max_connections_per_request"))
+    request_scoped_cap = max(1, settings.get_int("routing.request_scoped_attempts"))
     deadline = time.monotonic() + config.UPSTREAM_TOTAL_TIMEOUT_S
     usage_acc: dict[str, Any] = {}
     signals_acc: dict[str, Any] = {}
+    # # Kegagalan terakhir dari upstream, supaya kalau kandidat habis yang
+    # # dilaporkan ke klien adalah penyebab SEBENARNYA, bukan all_locked.
+    last_classified: errors.Classified | None = None
     trace.stage(trace_mod.STEP_OPENAI_MID, {**payload, "model": model, "stream": stream}, direction="out")
 
     while True:
@@ -275,6 +285,20 @@ async def _dispatch(
             if chosen is None:
                 opening = selector.next_opening_ms(skipped) if skipped else None
                 wait_s = max(1, (opening - now_ms()) // 1000) if opening else None
+                if attempts and last_classified is not None:
+                    # # Semua kandidat sudah dicoba: yang dilaporkan ke klien
+                    # # adalah KEGAGALAN UPSTREAM TERAKHIR, bukan all_locked.
+                    # # all_locked berarti "belum ada yang dicoba dan semuanya
+                    # # terkunci" -- memakainya di sini menelan kalimat vendor
+                    # # dan membuat operator kehilangan penyebab sebenarnya.
+                    yield {"__error__": True,
+                           "message": last_classified.message[:900],
+                           "code": last_classified.error_class,
+                           "status": last_classified.client_status,
+                           "upstream_status": None,
+                           "vendor_code": last_classified.vendor_code,
+                           "note": f"all {attempts} candidate(s) tried; no connection left to try"}
+                    return
                 yield {"__error__": True, "message": message, "code": errors.CLASS_ALL_LOCKED,
                        "status": 503, "upstream_status": None, "vendor_code": None,
                        "retry_after": wait_s}
@@ -443,22 +467,36 @@ async def _dispatch(
             continue
 
         excluded.add(chosen.credentials.connection_id)
+        last_classified = classified
 
         stop_reason = None
         if got_first:
             stop_reason = "bytes were already sent to the client"
         elif not classified.policy.retry_internally:
             stop_reason = f"class {classified.error_class} must not be retried internally"
+        elif (classified.error_class in errors.REQUEST_SCOPED_CLASSES
+              and attempts >= request_scoped_cap):
+            # # Body salah bentuk / model tidak ada: SETIAP akun akan menolak
+            # # dengan cara yang sama. Rotasi penuh di sini bukan failover, itu
+            # # self-DoS -- satu request bisa menghukum ratusan akun sehat lalu
+            # # mengunci semuanya. Tiga akun cukup untuk membuktikan "bukan akun
+            # # ini", sisanya dibuang.
+            stop_reason = (f"request-scoped error {classified.error_class}: "
+                           f"stopped after {attempts} account(s)")
         elif attempts >= max_attempts:
             stop_reason = f"attempt cap of {max_attempts} reached"
         elif time.monotonic() > deadline:
             stop_reason = "gateway deadline reached"
         if stop_reason:
+            # Pesan vendor diteruskan APA ADANYA; alasan berhentinya engrix masuk
+            # field terpisah (`note`). Dulu keduanya digabung jadi satu string, jadi
+            # operator gak bisa lagi membedakan kalimat vendor dari kalimat gateway.
             yield {"__error__": True,
-                   "message": f"{classified.message[:500]} ({stop_reason})",
+                   "message": classified.message[:900],
                    "code": classified.error_class, "status": classified.client_status,
                    "upstream_status": getattr(failure, "status", None),
-                   "vendor_code": classified.vendor_code}
+                   "vendor_code": classified.vendor_code,
+                   "note": stop_reason}
             return
         delay = _sleep_before_retry(classified, definition)
         if delay:
@@ -590,7 +628,8 @@ async def stream_chat(body: dict[str, Any], *, api_key_id: str | None = None, la
         if frame.get("__error__"):
             yield openai_fmt.error_frame(str(frame.get("message") or "upstream error"),
                                        code=str(frame.get("code") or errors.CLASS_UNKNOWN),
-                                       status=int(frame.get("status") or 502))
+                                       status=int(frame.get("status") or 502),
+                                       note=frame.get("note"))
             return
         yield openai_fmt.sse(frame)
     yield openai_fmt.SSE_DONE

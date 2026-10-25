@@ -38,6 +38,20 @@ ACCOUNT_WILDCARD = "*"
 # Status yang membuat koneksi tidak layak dicoba sama sekali.
 BLOCKING_STATUSES = frozenset({STATUS_UNAVAILABLE, STATUS_NEEDS_REAUTH})
 
+# Kelas error yang TTL lock-nya naik eksponensial per kegagalan beruntun.
+# Dulu cuma rate_limited; kelas transient (upstream_unavailable / timeout /
+# unknown) memakai TTL DATAR, sehingga akun yang benar-benar mati di sisi vendor
+# kembali "sehat" tiap 2 detik dan dihantam lagi -- lihat komentar di
+# register_error. register_success mereset backoff_level ke 0, jadi akun yang
+# pulih tidak menanggung riwayat ini.
+ESCALATING_CLASSES = frozenset({
+    errors.CLASS_UPSTREAM_UNAVAILABLE,
+    errors.CLASS_UPSTREAM_TIMEOUT,
+    errors.CLASS_STREAM_STALLED,
+    errors.CLASS_UNKNOWN,
+})
+
+
 
 def ensure(connection_id: str, *, ts: int | None = None) -> None:
     moment = now_ms() if ts is None else ts
@@ -97,7 +111,24 @@ def is_available(connection_id: str, model: str, *, ts: int | None = None) -> bo
         # # rate-limit juga sudah lewat, status boleh pulang sendiri ke
         # # cooling; kalau tidak, satu error quota_daily jam 14:00 bikin
         # # akun mati selamanya sampai admin re-test manual.
-        if health["test_status"] == STATUS_UNAVAILABLE:
+        if (health["test_status"] == STATUS_NEEDS_REAUTH
+                and health["error_class"] == errors.CLASS_ACCOUNT_RESTRICTED):
+            # # Blokir vendor itu berwaktu, bukan token mati. Tanpa jalan keluar ini
+            # # akun yang dibatasi 11140 terkunci selamanya walau bandingnya diterima,
+            # # karena needs_reauth tidak punya self-heal sama sekali. Kelas lain
+            # # (credential_dead) sengaja TIDAK ikut: token busuk memang harus login
+            # # ulang, bukan ditebak-tebak.
+            if not _locks_of(connection_id, ACCOUNT_WILDCARD, moment):
+                execute(
+                    "UPDATE connection_health SET test_status=?, updated_at=? WHERE connection_id=?",
+                    (STATUS_COOLING, moment, connection_id),
+                )
+                applog.info("health", f"self-heal {connection_id}: "
+                                      f"restricted -> cooling, lock expired")
+                health["test_status"] = STATUS_COOLING
+            else:
+                return False
+        elif health["test_status"] == STATUS_UNAVAILABLE:
             heal = get_bool("health.self_heal_unavailable")
             rate_ok = not (health["rate_limited_until"] and health["rate_limited_until"] > moment)
             if heal and rate_ok and not _locks_of(connection_id, ACCOUNT_WILDCARD, moment):
@@ -290,6 +321,15 @@ def _lock_ms_for(classified: errors.Classified, *, now_ts: int,
         # sampai reset kalender (TASK-48). Akun harus tetap boleh dicoba lagi
         # dengan body yang betul.
         return ("model", get_int("health.anti_abuse_cooldown_ms"), "anti-abuse shape rejection")
+    elif policy.lock == "restricted":
+        # Vendor memblokir AKUN (bukan token mati, bukan body salah). Kunci
+        # seluruh akun untuk jendela panjang, tapi JANGAN pakai status
+        # needs_reauth: status itu pintu satu arah (is_available menolaknya
+        # tanpa self-heal), padahal blokir vendor bisa dicabut lewat banding.
+        # Dengan cooling + lock berwaktu, akun dicoba lagi sekali per jendela
+        # dan pulih sendiri kalau blokirnya sudah lewat.
+        return ("account", get_int("health.cooldown_restricted_ms"),
+                "vendor restricted this account")
     elif policy.lock == "drift":
         ttl = 15 * 60 * 1000
         scope = "account"
@@ -307,10 +347,32 @@ def register_error(connection_id: str, model: str, classified: errors.Classified
     error_class = classified.error_class
 
     scope, ttl_or_level, why = _lock_ms_for(classified, now_ts=moment, connection_id=connection_id)
+    # backoff_level = panjang deret gagal BERUNTUN untuk kelas yang SAMA.
+    # Kalau kelasnya berganti, deret lama tidak boleh membonceng: tanpa ini,
+    # akun yang kena 503 delapan kali lalu satu 429 langsung dapat 2^8 x base
+    # = 300 detik untuk pelanggaran yang cuma butuh 2 detik.
+    streak = int(health["backoff_level"]) if health["error_class"] == error_class else 0
     if error_class == errors.CLASS_RATE_LIMIT:
-        level = min(get_int("health.backoff_max_level"), int(health["backoff_level"]) + 1)
+        level = min(get_int("health.backoff_max_level"), streak + 1)
         ttl = min(get_int("health.backoff_max_ms"), get_int("health.backoff_base_ms") * (2 ** (level - 1)))
         backoff_level = level
+    elif error_class in ESCALATING_CLASSES:
+        # # Kenapa kelas transient ikut dieskalasi: dulu TTL-nya DATAR
+        # # (health.cooldown_transient_ms, 2s di DB owner). Akun yang benar-benar
+        # # rusak -- qoder membalas {"msgCode":500,"msgInfo":"Internal Server Error"}
+        # # untuk SEMUA request -- jadi "sehat" lagi 2 detik kemudian, terpilih
+        # # lagi sebagai prioritas 1 (fill-first), gagal lagi. Terukur di log
+        # # 2026-10-25: 89 kegagalan 503 beruntun pada satu akun dalam 15 menit,
+        # # tiap baris "locked 2s". Itu bukan failover, itu putaran tanpa akhir.
+        # # Sekarang TTL-nya 2^level seperti rate limit (base = cooldown_transient_ms,
+        # # cap = backoff_max_ms) dan register_success yang menurunkannya ke 0 --
+        # # akun yang pulih langsung kembali normal, akun yang mati berhenti
+        # # dihantam tiap 2 detik.
+        level = min(get_int("health.backoff_max_level"), streak + 1)
+        base = max(1, get_int("health.cooldown_transient_ms"))
+        ttl = min(get_int("health.backoff_max_ms"), base * (2 ** (level - 1)))
+        backoff_level = level
+        why = f"{why}:escalated"
     else:
         ttl = ttl_or_level
         backoff_level = int(health["backoff_level"])
