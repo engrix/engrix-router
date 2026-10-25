@@ -95,7 +95,31 @@ def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if reasoning:
             blocks.append({"type": "thinking", "thinking": str(reasoning)})
         content = message.get("content")
-        if content:
+        if isinstance(content, list):
+            # Konten array OpenAI (teks + image_url) yang diteruskan mentah ke
+            # vendor membuat gambar sampai sebagai TEKS JSON: ga error, tapi
+            # model ga pernah melihat gambarnya (1x1 PNG live-test, 2026-10-20).
+            # Peta ke blok Anthropic resmi: text, image base64 (data: URL),
+            # image URL https.
+            for part in content:
+                if isinstance(part, str):
+                    blocks.append({"type": "text", "text": part})
+                elif not isinstance(part, dict):
+                    continue
+                elif part.get("type") == "text":
+                    blocks.append({"type": "text", "text": str(part.get("text") or "")})
+                elif part.get("type") == "image_url":
+                    url = str((part.get("image_url") or {}).get("url") or "")
+                    if url.startswith("data:"):
+                        head, _, b64 = url.partition(",")
+                        media_type = head[len("data:"):].split(";", 1)[0] or "image/png"
+                        blocks.append({"type": "image",
+                                       "source": {"type": "base64", "media_type": media_type,
+                                                  "data": b64}})
+                    elif url.startswith(("http://", "https://")):
+                        blocks.append({"type": "image",
+                                       "source": {"type": "url", "url": url}})
+        elif content:
             blocks.append({"type": "text", "text": str(content)})
         for call in message.get("tool_calls") or []:
             function = call.get("function") or {}
