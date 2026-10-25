@@ -28,6 +28,7 @@ from engrix_router.core import logs as applog
 from engrix_router.pipeline import runner
 from engrix_router.storage import settings
 from engrix_router.core import errors
+from engrix_router.api import sse
 
 router = APIRouter()
 
@@ -68,10 +69,12 @@ async def chat_completions(request: Request,
     try:
         if stream:
             return StreamingResponse(
-                runner.stream_chat(body, api_key_id=api_key_id, lane=lane),
+                # keepalive: fase mikir yang panjang jangan sampai kelihatan seperti
+                # stream mati (lihat api/sse.py). Frame konten diteruskan apa adanya.
+                sse.with_keepalive(runner.stream_chat(body, api_key_id=api_key_id, lane=lane)),
                 media_type="text/event-stream",
                 headers={"cache-control": "no-cache", "x-accel-buffering": "no",
-                         "x-engrix-request": "stream"},
+                         "connection": "keep-alive", "x-engrix-request": "stream"},
             )
         result = await runner.run_chat(body, api_key_id=api_key_id, lane=lane)
         return JSONResponse(result)

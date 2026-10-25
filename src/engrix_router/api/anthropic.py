@@ -26,6 +26,7 @@ from engrix_router.core import errors
 from engrix_router.core.ids import new_id
 from engrix_router.core import logs as applog
 from engrix_router.api import deps
+from engrix_router.api import sse
 from engrix_router.pipeline import runner
 
 router = APIRouter()
@@ -82,10 +83,12 @@ async def messages(request: Request,
     try:
         if stream:
             return StreamingResponse(
-                _stream(canonical, api_key_id=api_key_id, lane=lane),
+                # keepalive: fase mikir yang panjang jangan sampai kelihatan seperti
+                # stream mati (lihat api/sse.py). Event konten diteruskan apa adanya.
+                sse.with_keepalive(_stream(canonical, api_key_id=api_key_id, lane=lane)),
                 media_type="text/event-stream",
                 headers={"cache-control": "no-cache", "x-accel-buffering": "no",
-                         "x-engrix-request": "stream"},
+                         "connection": "keep-alive", "x-engrix-request": "stream"},
             )
         completion = await runner.run_chat(canonical, api_key_id=api_key_id, lane=lane,
                                            endpoint="/v1/messages")
@@ -123,6 +126,9 @@ async def _stream(canonical: dict[str, Any], *, api_key_id: str | None, lane: st
             payload = anthropic_fmt.error_body(str(frame.get("message") or "upstream error"),
                                            status=int(frame.get("status") or 502))
             payload["error"]["code"] = str(frame.get("code") or errors.CLASS_UNKNOWN)
+            if frame.get("note"):
+                # alasan routing engrix, terpisah dari kalimat vendor
+                payload["error"]["engrix_note"] = str(frame["note"])[:400]
             yield anthropic_fmt.sse_event("error", payload)
             return
         if not started:

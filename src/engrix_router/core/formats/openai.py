@@ -65,11 +65,19 @@ def sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 
 
-def error_frame(message: str, *, code: str, status: int) -> str:
+def error_frame(message: str, *, code: str, status: int, note: str | None = None) -> str:
     """
     Terminal frame for a stream that failed after the 200 was sent.
+
+    `message` is the upstream's own words, verbatim. Anything this gateway wants to
+    say about its own routing goes in `engrix_note` -- appending it to the vendor
+    message made "what the vendor said" indistinguishable from "what engrix did".
     """
-    return sse({"error": {"message": message[:900], "type": "server_error", "code": code, "status": status}}) + SSE_DONE
+    error: dict[str, Any] = {"message": message[:900], "type": "server_error", "code": code,
+                             "status": status}
+    if note:
+        error["engrix_note"] = note[:400]
+    return sse({"error": error}) + SSE_DONE
 
 
 def aggregate_stream_text(chunks: list[dict[str, Any]]) -> dict[str, Any]:
