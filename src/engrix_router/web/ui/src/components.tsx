@@ -148,6 +148,69 @@ export function ConfirmBar(props: { text: string; onYes: () => void; onNo: () =>
   );
 }
 
+// Saklar on/off (padanan toggle hijau di dashboard 9router): satu ketuk di baris
+// akun, tanpa buka form edit dulu. Bukan checkbox -- target sentuhnya lebih besar
+// dan status-nya kebaca dari warna, bukan dari centang kecil.
+export function Switch(props: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  disabled?: boolean;
+  label?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={props.checked}
+      aria-label={props.label}
+      title={props.label}
+      disabled={props.disabled}
+      className={"switch" + (props.checked ? " on" : "")}
+      onClick={() => props.onChange(!props.checked)}
+    >
+      <span className="knob" />
+    </button>
+  );
+}
+
+// Logo vendor. Berkas-berkas ini disalin dari paket logo provider (9router
+// public/providers/*.png) ke web/static/assets/logos: gambar asli, bukan inisial
+// yang ditebak. Vendor yang belum punya berkas jatuh ke monogram berwarna -- kotak
+// kosong lebih buruk daripada huruf pertama yang konsisten.
+const PROVIDER_LOGOS: Record<string, string> = {
+  cline: "cline", muse: "muse", qoder: "qoder", "qoder-cn": "qoder-cn",
+  zcode: "glm", "zcode-plan": "glm",
+  openai: "openai", anthropic: "anthropic", codex: "codex", cursor: "cursor",
+  zed: "zed", kimi: "kimi", nvidia: "nvidia", openrouter: "openrouter", xai: "xai",
+};
+
+// Warna monogram diturunkan dari nama merek, jadi merek yang sama selalu dapat
+// warna yang sama tanpa tabel warna yang harus dirawat.
+function _hue(seed: string): number {
+  let h = 0;
+  for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return h;
+}
+
+export function providerLogoFile(id: string): string | null {
+  return PROVIDER_LOGOS[id] || null;
+}
+
+export function ProviderLogo(props: { id: string; brand?: string; size?: "sm" | "md" }) {
+  const file = providerLogoFile(props.id);
+  const cls = "plogo" + (props.size === "md" ? " md" : "");
+  if (file) {
+    return <img className={cls} src={`/static/assets/logos/${file}.png`} alt="" loading="lazy" />;
+  }
+  const seed = props.brand || props.id || "?";
+  return (
+    <span className={cls + " mono"} aria-hidden="true"
+      style={{ background: `hsl(${_hue(seed)} 45% 42%)` }}>
+      {seed.slice(0, 2).toUpperCase()}
+    </span>
+  );
+}
+
 export function IdLink(props: { id: string }) {
   return <code className="mono tiny" title={props.id}>{short(props.id)}</code>;
 }

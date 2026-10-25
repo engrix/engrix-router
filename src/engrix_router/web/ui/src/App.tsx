@@ -68,11 +68,15 @@ export default function App() {
   }, []);
   useEffect(() => { ping(); const tm = setInterval(ping, 20000); return () => clearInterval(tm); }, [ping]);
 
-  // Restart gateway dari dashboard: POST /api/system/restart (server menembak
-  // helper detached yang stop+start proses), lalu /health dipoll sampai server
-  // balik dengan boot baru -- semua view ke-refresh otomatis begitu hidup lagi
-  // (refreshKey++), tanpa reload halaman. Timeout bukan gagal final: watchdog
-  // di server tetap akan menyalakan lagi.
+  // Restart gateway dari dashboard: POST /api/system/restart menembak helper
+  // detached (scripts/ops/router_restart.py) yang mengurus stop+start dan
+  // mencatat setiap tahap ke logs/restart-journal.json. UI TIDAK menebak dari
+  // uptime lagi -- dulu /health dipoll dengan batas "server lama harus mati
+  // dalam 20 detik", jadi restart yang cuma lambat langsung dilaporkan
+  // "restart gagal -- server lama masih jawab" padahal helper masih jalan.
+  // Sekarang: journal adalah sumber kebenaran. "done" = sukses, "failed" =
+  // tampilkan ALASAN aslinya, dan poll uptime hanya cadangan kalau journal
+  // tidak bisa dibaca (mis. server baru belum melayani /api).
   const [restartState, setRestartState] = useState<"idle" | "confirm" | "sent" | "waiting">("idle");
   const [restartMsg, setRestartMsg] = useState<string | null>(null);
   const [restartErr, setRestartErr] = useState<string | null>(null);
@@ -83,16 +87,53 @@ export default function App() {
     try { await api("/api/system/restart", { method: "POST", body: "{}" }); }
     catch { /* respons bisa mati bersama server -- polling tetap lanjut */ }
     setRestartState("waiting"); setRestartMsg(t("system.restart_waiting"));
-    const DOWN_DEADLINE = Date.now() + 20000;   // fase turun: server lama harus mati
-    const UP_DEADLINE = Date.now() + 100000;    // fase naik: batas total
+
+    const UP_DEADLINE = Date.now() + 150000;   // batas total, bukan batas fase
     let sawDown = false;
+    let lastStage = "";
+
     for (;;) {
       if (Date.now() > UP_DEADLINE) {
         setRestartState("idle"); setRestartMsg(null);
-        setRestartErr(fmt("system.restart_timeout", { value: 100 }));
+        setRestartErr(fmt("system.restart_timeout", { value: 150 }));
         return;
       }
       await new Promise(r => setTimeout(r, 1000));
+
+      // 1. journal = sumber kebenaran (file, jadi selamat melewati restart)
+      let journal: { state?: string; stage?: string; reason?: string | null } | null = null;
+      try {
+        journal = await api<{ state?: string; stage?: string; reason?: string | null }>(
+          "/api/system/restart/status",
+        );
+      } catch { journal = null; }
+
+      if (journal) {
+        if (journal.state === "done") {
+          setRestartState("idle"); setRestartErr(null);
+          setRestartMsg(t("system.restart_done"));
+          setTimeout(() => setRestartMsg(null), 8000);
+          setRefreshKey(k => k + 1);
+          ping();
+          return;
+        }
+        if (journal.state === "failed") {
+          setRestartState("idle"); setRestartMsg(null);
+          setRestartErr(fmt("system.restart_failed_reason", {
+            value: journal.reason || journal.stage || "unknown",
+          }));
+          return;
+        }
+        const stage = journal.stage || journal.state || "";
+        if (stage && stage !== lastStage) {
+          lastStage = stage;
+          setRestartMsg(fmt("system.restart_stage", { value: stage }));
+        }
+        continue;   // journal masih berjalan -- jangan menebak apa pun
+      }
+
+      // 2. journal tidak terbaca: server mungkin sedang mati / baru boot.
+      //    Hanya di sini uptime dipakai, dan HANYA untuk menyimpulkan sukses.
       let ok = false; let uptime = 0;
       try {
         const h = await fetch("/health").then(r => r.json());
@@ -105,11 +146,6 @@ export default function App() {
         setTimeout(() => setRestartMsg(null), 8000);
         setRefreshKey(k => k + 1);
         ping();
-        return;
-      }
-      if (Date.now() > DOWN_DEADLINE) {
-        setRestartState("idle"); setRestartMsg(null);
-        setRestartErr(t("system.restart_failed"));
         return;
       }
     }

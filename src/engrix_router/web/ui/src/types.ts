@@ -257,3 +257,28 @@ export interface ModelTestRow {
   latency_ms: number | null;
   error_class?: string | null;
 }
+
+export interface BackupDoc {
+  version: number;
+  app: string;
+  exported_at: string;
+  connections: Record<string, unknown>[];
+}
+
+export interface BackupImportResult {
+  mode: string;
+  total: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  errors: { index: number; name?: string | null; error: string }[];
+}
+
+export interface BulkResult {
+  action: string;
+  provider: string | null;
+  total: number;
+  changed: number;
+  unchanged: number;
+  no_quota_data: number;
+}
