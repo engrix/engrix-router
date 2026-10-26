@@ -82,10 +82,33 @@ async def messages(request: Request,
     model = str(canonical.get("model") or "")
     try:
         if stream:
+            # # Sama seperti /v1/chat/completions: status HTTP diputuskan sebelum
+            # # StreamingResponse ada, supaya kegagalan awal tidak tersamar jadi 200.
+            # # Renderer dibikin DI SINI, bukan di dalam _stream, supaya peek frame
+            # # pertama lewat render yang sama. Peek dengan render dummy membuang
+            # # content_block_start milik frame pertama -- urutan event Anthropic
+            # # jadi tidak lengkap dan klien menolaknya.
+            request_id = new_id()
+            renderer = anthropic_fmt.StreamRenderer(request_id, model)
+            pending: list[str] = []
+
+            def render(frame: dict[str, Any]) -> str:
+                pending[:] = renderer.push(frame)
+                return "".join(pending)
+
+            frames = runner.stream_frames(canonical, api_key_id=api_key_id, lane=lane,
+                                          endpoint="/v1/messages", render=render,
+                                          request_id=request_id)
+            first, frames = await runner.head_frame(frames)
+            if first is not None and first.get("__error__"):
+                return _error_response(runner.RequestRejected(
+                    runner.classified_from_frame(first)))
             return StreamingResponse(
                 # keepalive: fase mikir yang panjang jangan sampai kelihatan seperti
                 # stream mati (lihat api/sse.py). Event konten diteruskan apa adanya.
-                sse.with_keepalive(_stream(canonical, api_key_id=api_key_id, lane=lane)),
+                sse.with_keepalive(_stream(canonical, api_key_id=api_key_id, lane=lane,
+                                           frames=frames, renderer=renderer,
+                                           pending=pending)),
                 media_type="text/event-stream",
                 headers={"cache-control": "no-cache", "x-accel-buffering": "no",
                          "connection": "keep-alive", "x-engrix-request": "stream"},
@@ -106,11 +129,23 @@ async def messages(request: Request,
                             status_code=classified.client_status)
 
 
-async def _stream(canonical: dict[str, Any], *, api_key_id: str | None, lane: str) -> AsyncIterator[str]:
-    """Render the canonical frame stream as Anthropic events (no [DONE] sentinel)."""
+async def _stream(canonical: dict[str, Any], *, api_key_id: str | None, lane: str,
+                   frames: AsyncIterator[dict[str, Any]] | None = None,
+                   renderer: anthropic_fmt.StreamRenderer | None = None,
+                   pending: list[str] | None = None) -> AsyncIterator[str]:
+    """Render the canonical frame stream as Anthropic events (no [DONE] sentinel).
+
+    `frames` / `renderer` / `pending` are passed in when the caller already peeked
+    the first frame to choose the HTTP status. The peeked frame is replayed by the
+    iterator and its rendered lines are still sitting in `pending`, so the state
+    machine continues exactly where the peek left it -- no event rendered twice,
+    none dropped.
+    """
     request_id = new_id()
-    renderer = anthropic_fmt.StreamRenderer(request_id, str(canonical.get("model") or ""))
-    pending: list[str] = []
+    if renderer is None:
+        renderer = anthropic_fmt.StreamRenderer(request_id, str(canonical.get("model") or ""))
+    if pending is None:
+        pending = []
 
     def render(frame: dict[str, Any]) -> str:
         # Dipanggil runner SEBELUM frame di-yield, jadi baris event-nya udah siap
@@ -119,9 +154,11 @@ async def _stream(canonical: dict[str, Any], *, api_key_id: str | None, lane: st
         return "".join(pending)
 
     started = False
-    async for frame in runner.stream_frames(canonical, api_key_id=api_key_id, lane=lane,
-                                            endpoint="/v1/messages", render=render,
-                                            request_id=request_id):
+    if frames is None:
+        frames = runner.stream_frames(canonical, api_key_id=api_key_id, lane=lane,
+                                      endpoint="/v1/messages", render=render,
+                                      request_id=request_id)
+    async for frame in frames:
         if frame.get("__error__"):
             payload = anthropic_fmt.error_body(str(frame.get("message") or "upstream error"),
                                            status=int(frame.get("status") or 502))

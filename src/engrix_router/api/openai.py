@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from engrix_router.core import config
 from engrix_router.api import deps
-from engrix_router.accounts import catalog, connections
+from engrix_router.accounts import catalog, connections, health as health_mod
 from engrix_router.core import logs as applog
 from engrix_router.pipeline import runner
 from engrix_router.storage import settings
@@ -68,10 +68,19 @@ async def chat_completions(request: Request,
     api_key_id = client["id"] if client else None
     try:
         if stream:
+            # # Status HTTP harus diputuskan SEBELUM StreamingResponse ada. Kalau
+            # # frame pertama sudah error (tidak ada akun yang bisa melayani),
+            # # menjawab 200 + body error bikin SDK klien melihat "sukses dengan
+            # # jawaban kosong" -- penyebab aslinya tidak pernah sampai ke mereka.
+            frames = runner.stream_frames(body, api_key_id=api_key_id, lane=lane)
+            first, frames = await runner.head_frame(frames)
+            if first is not None and first.get("__error__"):
+                return _error_response(runner.RequestRejected(
+                    runner.classified_from_frame(first)))
             return StreamingResponse(
                 # keepalive: fase mikir yang panjang jangan sampai kelihatan seperti
                 # stream mati (lihat api/sse.py). Frame konten diteruskan apa adanya.
-                sse.with_keepalive(runner.stream_chat(body, api_key_id=api_key_id, lane=lane)),
+                sse.with_keepalive(runner.sse_frames(frames)),
                 media_type="text/event-stream",
                 headers={"cache-control": "no-cache", "x-accel-buffering": "no",
                          "connection": "keep-alive", "x-engrix-request": "stream"},
@@ -86,6 +95,25 @@ async def chat_completions(request: Request,
         return JSONResponse(errors.client_error_body(errors.CLASS_UNKNOWN,
                                                      "internal gateway error"),
                             status_code=classified.client_status)
+
+
+def _is_usable(row: dict[str, Any]) -> bool:
+    """Can this connection serve a request right now?
+
+    Three separate reasons a row cannot: the operator blocked it (needs_reauth /
+    unavailable), it has no credential at all, or the token already expired.
+    Checked here rather than inside the catalog call because the answer decides
+    whether the provider appears in the list at all.
+    """
+    health = row.get("health") or {}
+    if health.get("test_status") in health_mod.BLOCKING_STATUSES:
+        return False
+    creds = connections.load_credentials(row["id"])
+    if creds is None:
+        return False
+    if not creds.token and creds.auth_type != "none":
+        return False
+    return not creds.is_expired
 
 
 @router.get("/v1/models")
@@ -103,10 +131,18 @@ async def list_models(request: Request, client: dict | None = Depends(deps.requi
     entries: dict[str, dict[str, Any]] = {}
     for definition in registry.definitions():
         rows = connections.list_for_provider(definition.id, include_health=True)
+        # # Katalog adalah JANJI, bukan iklan: model yang ditawarkan di sini akan
+        # # dipilih klien dan langsung gagal kalau tidak ada akun yang bisa
+        # # melayaninya. Dulu /v1/models menawarkan cline/... padahal token
+        # # satu-satunya akun cline sudah kedaluwarsa -- klien menabrak 503 yang
+        # # tidak bisa dihindarinya.
+        usable = [row for row in rows if _is_usable(row)]
+        if not usable:
+            continue
         live_models: list[Any] = []
-        for row in rows:
+        for row in usable:
             creds = connections.load_credentials(row["id"])
-            if creds is None or (not creds.token and creds.auth_type != "none"):
+            if creds is None:
                 continue
             try:
                 live_models = await catalog.models_for(registry.get_provider(definition.id), creds)
@@ -125,6 +161,6 @@ async def list_models(request: Request, client: dict | None = Depends(deps.requi
                 "context_length": model.context_length,
                 "supports_vision": model.supports_vision,
                 "supports_tools": model.supports_tools,
-                "connections": len(rows),
+                "connections": len(usable),
             }
     return {"object": "list", "data": [entries[key] for key in sorted(entries)]}

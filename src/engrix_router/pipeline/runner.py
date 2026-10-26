@@ -509,6 +509,50 @@ async def _dispatch(
             await asyncio.sleep(delay)
 
 
+def classified_from_frame(frame: dict[str, Any]) -> errors.Classified:
+    """Turn a ``{"__error__": True, ...}`` frame back into a Classified.
+
+    Extracted so the streaming route can reuse the SAME decision the non-stream
+    path makes. Duplicating it would let the two paths disagree about which
+    class an error belongs to -- and the class is what the client keys on.
+    """
+    code = str(frame.get("code") or "")
+    if code in errors.ALL_CLASSES:
+        # Keputusan yang udah kita ambil sendiri gak boleh dilempar balik ke
+        # classify(): status 503 + "no healthy connection" mendarat di
+        # upstream_unavailable, jadi label all_locked ilang dari log DAN dari
+        # error body, plus Retry-After hasil next_opening_ms ikut kebuang.
+        return errors.for_class(code, str(frame.get("message") or ""),
+                                retry_after_s=frame.get("retry_after"),
+                                vendor_code=frame.get("vendor_code"))
+    return errors.classify(status=int(frame.get("status") or 502),
+                           text=str(frame.get("message") or ""),
+                           vendor_code=frame.get("vendor_code"),
+                           exception_name=code or None)
+
+
+async def head_frame(frames: AsyncIterator[dict[str, Any]]
+                     ) -> tuple[dict[str, Any] | None, AsyncIterator[dict[str, Any]]]:
+    """Pull the first frame so the caller can still pick the HTTP status.
+
+    Once a byte of SSE has been written the status is already 200 and cannot be
+    taken back -- that is why the peek happens here, before StreamingResponse
+    exists. The first frame is replayed by the returned iterator, so the
+    consumer sees exactly the same sequence as without the peek.
+    """
+    try:
+        first = await frames.__anext__()
+    except StopAsyncIteration:
+        return None, frames
+
+    async def replay() -> AsyncIterator[dict[str, Any]]:
+        yield first
+        async for frame in frames:
+            yield frame
+
+    return first, replay()
+
+
 async def run_chat(body: dict[str, Any], *, api_key_id: str | None = None,
                    lane: str = "interactive",
                    endpoint: str = "/v1/chat/completions",
@@ -531,20 +575,7 @@ async def run_chat(body: dict[str, Any], *, api_key_id: str | None = None,
             trace.finish(status=trace_mod.STATUS_UPSTREAM_ERROR, http_out=int(frame["status"]),
                          error_class=str(frame["code"]), error_text=str(frame["message"]),
                          upstream_status=frame.get("upstream_status"), error_code=frame.get("vendor_code"))
-            code = str(frame.get("code") or "")
-            if code in errors.ALL_CLASSES:
-                # Keputusan yang udah kita ambil sendiri gak boleh dilempar balik ke
-                # classify(): status 503 + "no healthy connection" mendarat di
-                # upstream_unavailable, jadi label all_locked ilang dari log DAN dari
-                # error body, plus Retry-After hasil next_opening_ms ikut kebuang.
-                classified = errors.for_class(code, str(frame.get("message") or ""),
-                                              retry_after_s=frame.get("retry_after"),
-                                              vendor_code=frame.get("vendor_code"))
-            else:
-                classified = errors.classify(status=int(frame["status"]), text=str(frame["message"]),
-                                             vendor_code=frame.get("vendor_code"),
-                                             exception_name=code or None)
-            raise RequestRejected(classified)
+            raise RequestRejected(classified_from_frame(frame))
         chunks.append(frame)
     usage = trace.usage or usage_mod.estimate_from_body(body)
     completion = openai_fmt.to_completion(trace.request_id, str(body.get("model") or model), chunks,
@@ -626,19 +657,27 @@ async def stream_frames(body: dict[str, Any], *, api_key_id: str | None = None,
     _log_done(trace, result)
 
 
-async def stream_chat(body: dict[str, Any], *, api_key_id: str | None = None, lane: str = "interactive",
-                      endpoint: str = "/v1/chat/completions") -> AsyncIterator[str]:
+def sse_frames(frames: AsyncIterator[dict[str, Any]]) -> AsyncIterator[str]:
+    """Render canonical frames as OpenAI SSE strings, ending with [DONE]."""
+    async def render() -> AsyncIterator[str]:
+        async for frame in frames:
+            if frame.get("__error__"):
+                yield openai_fmt.error_frame(str(frame.get("message") or "upstream error"),
+                                             code=str(frame.get("code") or errors.CLASS_UNKNOWN),
+                                             status=int(frame.get("status") or 502),
+                                             note=frame.get("note"))
+                return
+            yield openai_fmt.sse(frame)
+        yield openai_fmt.SSE_DONE
+
+    return render()
+
+
+def stream_chat(body: dict[str, Any], *, api_key_id: str | None = None, lane: str = "interactive",
+                endpoint: str = "/v1/chat/completions") -> AsyncIterator[str]:
     """Streaming path in the OpenAI wire format: yields SSE strings, ends with [DONE]."""
-    async for frame in stream_frames(body, api_key_id=api_key_id, lane=lane, endpoint=endpoint,
-                                     render=openai_fmt.sse):
-        if frame.get("__error__"):
-            yield openai_fmt.error_frame(str(frame.get("message") or "upstream error"),
-                                       code=str(frame.get("code") or errors.CLASS_UNKNOWN),
-                                       status=int(frame.get("status") or 502),
-                                       note=frame.get("note"))
-            return
-        yield openai_fmt.sse(frame)
-    yield openai_fmt.SSE_DONE
+    return sse_frames(stream_frames(body, api_key_id=api_key_id, lane=lane, endpoint=endpoint,
+                                    render=openai_fmt.sse))
 
 
 def _tail(lines: list[str], limit: int = 4000) -> str:
