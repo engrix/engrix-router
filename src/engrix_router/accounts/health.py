@@ -62,23 +62,47 @@ def ensure(connection_id: str, *, ts: int | None = None) -> None:
     )
 
 
+def _blank(connection_id: str) -> dict[str, Any]:
+    """The row get() synthesises when a connection has no health record yet."""
+    return {
+        "connection_id": connection_id,
+        "test_status": STATUS_UNKNOWN,
+        "error_code": None,
+        "error_class": None,
+        "last_error": None,
+        "last_error_at": None,
+        "backoff_level": 0,
+        "rate_limited_until": None,
+        "last_used_at": None,
+        "consecutive_use_count": 0,
+        "last_probe_at": None,
+    }
+
+
 def get(connection_id: str) -> dict[str, Any]:
     row = query_one("SELECT * FROM connection_health WHERE connection_id = ?", (connection_id,))
-    if row is None:
-        return {
-            "connection_id": connection_id,
-            "test_status": STATUS_UNKNOWN,
-            "error_code": None,
-            "error_class": None,
-            "last_error": None,
-            "last_error_at": None,
-            "backoff_level": 0,
-            "rate_limited_until": None,
-            "last_used_at": None,
-            "consecutive_use_count": 0,
-            "last_probe_at": None,
-        }
-    return dict(row)
+    return dict(row) if row is not None else _blank(connection_id)
+
+
+def many(connection_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Health rows for several connections in ONE query.
+
+    Counterpart of get() for list endpoints. Calling get() inside a loop turned
+    every list request into N+1 queries -- /api/connections and /api/state paid
+    ~40 ms of CPU per request on a 19-account fleet, and the cost grew linearly
+    with the account count. Missing rows come back with the same defaults get()
+    synthesises, so a caller cannot tell the two apart.
+    """
+    ids = list(dict.fromkeys(connection_ids))
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    rows = query(
+        f"SELECT * FROM connection_health WHERE connection_id IN ({placeholders})",  # noqa: S608 -- placeholders only
+        tuple(ids),
+    )
+    found = {row["connection_id"]: dict(row) for row in rows}
+    return {connection_id: found.get(connection_id) or _blank(connection_id) for connection_id in ids}
 
 
 def for_provider(provider: str) -> dict[str, dict[str, Any]]:
@@ -584,21 +608,33 @@ def clear_drift() -> None:
 
 
 def snapshot() -> list[dict[str, Any]]:
+    """Every connection's health row plus its live model locks.
+
+    The locks come from ONE query and are grouped in memory. The previous
+    version issued a separate query per connection, so /api/state spent
+    ~40 ms of CPU per request on a 19-account fleet and the cost would have
+    grown linearly with the account count.
+    """
+    moment = now_ms()
     rows = query(
         "SELECT h.*, c.provider, c.name, c.email FROM connection_health h"
         " JOIN connections c ON c.id = h.connection_id ORDER BY c.provider, c.priority"
     )
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for lock in query(
+        "SELECT connection_id, model, locked_until, reason FROM model_locks"
+        " WHERE locked_until > ? ORDER BY locked_until DESC",
+        (moment,),
+    ):
+        grouped.setdefault(lock["connection_id"], []).append({
+            "model": lock["model"],
+            "locked_until": lock["locked_until"],
+            "reason": lock["reason"],
+        })
     out = []
     for row in rows:
         item = dict(row)
-        item["locks"] = [
-            dict(lock)
-            for lock in query(
-                "SELECT model, locked_until, reason FROM model_locks"
-                " WHERE connection_id = ? AND locked_until > ? ORDER BY locked_until DESC",
-                (row["connection_id"], now_ms()),
-            )
-        ]
+        item["locks"] = grouped.get(row["connection_id"], [])
         out.append(item)
     return out
 

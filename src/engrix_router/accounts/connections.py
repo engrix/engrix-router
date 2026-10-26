@@ -228,9 +228,14 @@ def list_for_provider(provider: str | None = None, *, include_health: bool = Tru
         params = (provider,)
     sql += " ORDER BY provider, priority, created_at"
     rows = [_public_view(dict(row)) for row in query(sql, params)]
-    if include_health:
+    if include_health and rows:
+        # Satu query untuk seluruh baris. Versi sebelumnya memanggil health.get()
+        # di dalam loop, jadi daftar akun berubah jadi N+1 query -- 19 akun sudah
+        # memakan ~39 ms CPU per request, dan biayanya naik linear terhadap
+        # jumlah akun.
+        states = health.many([item["id"] for item in rows])
         for item in rows:
-            item["health"] = health.get(item["id"])
+            item["health"] = states[item["id"]]
     return rows
 
 
