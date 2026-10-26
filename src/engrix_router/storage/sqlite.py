@@ -17,17 +17,131 @@ Design choices:
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import threading
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from engrix_router.core import config
 
 _WRITE_LOCK = threading.Lock()
 _SCHEMA_READY = False
+
+# Koneksi persisten per thread, dipisah per (path, readonly).
+#
+# Kenapa ini bukan "pooling demi gaya": SQLite menjalankan checkpoint penuh dan
+# MENGHAPUS file -wal setiap kali koneksi terakhir ditutup. Dengan satu koneksi
+# per operasi, setiap operasi adalah "close terakhir", jadi setiap operasi bayar
+# checkpoint. Terukur di mesin owner (probe.sqlite3, 60 putaran):
+#
+#   open + SELECT + close       6,232 ms
+#   SELECT di koneksi persisten 0,017 ms
+#   open + 1 UPDATE + close    19,433 ms
+#   1 UPDATE di koneksi persisten 0,084 ms   -> 231x
+#
+# Thread-local, bukan satu koneksi global: objek sqlite3.Connection tidak boleh
+# dipakai dua thread sekaligus, dan check_same_thread=False cuma mematikan
+# pemeriksaannya, bukan bahayanya. Satu thread satu koneksi = aman tanpa lock
+# tambahan di jalur baca.
+_TLS = threading.local()
+
+
+def _cache() -> dict[tuple[str, bool], sqlite3.Connection]:
+    cache = getattr(_TLS, "conns", None)
+    if cache is None:
+        cache = {}
+        _TLS.conns = cache
+    return cache
+
+
+# Nilai env saat modul di-import. Dipakai sebagai pembanding: kalau env sekarang
+# BEDA dari baseline, berarti ada yang mengubahnya saat runtime (monkeypatch.setenv)
+# dan override itu harus dihormati -- lalu otomatis reversibel begitu fixture-nya
+# mengembalikan nilai lama.
+_ENV_DB_BASELINE = os.environ.get("EROUTER_DB_PATH")
+
+
+def db_path() -> Path:
+    """Resolve the database path at CALL time, not at import time.
+
+    The suite switches database two different ways and both must work:
+
+      * `monkeypatch.setenv("EROUTER_DB_PATH", tmp)`  -- env differs from the
+        baseline captured at import, so it wins. Reversible on teardown.
+      * `monkeypatch.setattr(config, "DB_PATH", tmp)` -- env is untouched, so
+        config.DB_PATH wins. Also reversible on teardown.
+
+    Capturing the path at import would make BOTH silently keep writing to the
+    shared test database while the test still passes -- the failure mode the
+    conftest docstring warns about.
+    """
+    current_env = os.environ.get("EROUTER_DB_PATH")
+    if current_env != _ENV_DB_BASELINE:
+        return Path(current_env).resolve() if current_env else config.DB_PATH
+    return config.DB_PATH
+
+
+def _persistent(*, readonly: bool) -> sqlite3.Connection:
+    """This thread's reusable connection for the current DB path.
+
+    Connections to a path that is no longer current are closed and dropped first:
+    a test that repoints the database then deletes the old file would otherwise
+    hit WinError 32 on Windows, because the handle is still open.
+    """
+    current = str(db_path())
+    cache = _cache()
+    for key in [k for k in cache if k[0] != current]:
+        try:
+            cache.pop(key).close()
+        except sqlite3.Error:
+            pass
+    key = (current, readonly)
+    conn = cache.get(key)
+    if conn is not None:
+        return conn
+    conn = connect(readonly=readonly)
+    cache[key] = conn
+    return conn
+
+
+def close_all() -> int:
+    """Close every cached connection on every thread that has one.
+
+    Only the CALLING thread's connections can be closed safely; the others are
+    closed by their own thread when it next resets. Returns how many this thread
+    closed. Tests and shutdown use it so Windows does not keep the file locked.
+    """
+    cache = _cache()
+    closed = 0
+    for conn in list(cache.values()):
+        try:
+            conn.close()
+            closed += 1
+        except sqlite3.Error:
+            pass
+    cache.clear()
+    return closed
+
+
+def reset_for_tests(path: str | None = None) -> None:
+    """Drop this thread's connections and forget the schema bootstrap.
+
+    Deliberately does NOT mutate config.DB_PATH: doing that made the switch
+    permanent, so the test that asked for it left every later test pointed at a
+    tmp file that its own teardown had already deleted. Switching databases is
+    the env var's job now (see db_path), which the fixture can undo. `path` stays
+    in the signature only so existing callers keep working.
+    """
+    close_all()
+    global _SCHEMA_READY
+    _SCHEMA_READY = False
+    # Pemanggil yang pindah database ingin database yang BISA DIPAKAI, bukan file
+    # kosong: tanpa ini query pertama gagal "no such table".
+    init_schema(force=True)
 
 SCHEMA_VERSION = 3
 
@@ -63,7 +177,7 @@ def date_key_utc(epoch_ms: int | None = None) -> str:
 
 
 def connect(*, readonly: bool = False) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(config.DB_PATH), timeout=10.0, check_same_thread=False)
+    conn = sqlite3.connect(str(db_path()), timeout=10.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 10000")
@@ -77,8 +191,14 @@ def connect(*, readonly: bool = False) -> sqlite3.Connection:
 
 @contextmanager
 def session(*, readonly: bool = False):
-    """`with session() as db:` - commits if the block succeeded, rolls back on raise."""
-    conn = connect(readonly=readonly)
+    """`with session() as db:` - commits if the block succeeded, rolls back on raise.
+
+    The connection is the thread's persistent one, NOT a fresh one: closing after
+    every read forces SQLite to checkpoint the whole WAL and delete the -wal file.
+    Measured 6.232 ms per open+SELECT+close against 0.017 ms on a persistent
+    connection. The block still commits/rolls back exactly as before.
+    """
+    conn = _persistent(readonly=readonly)
     try:
         yield conn
         if not readonly:
@@ -87,15 +207,18 @@ def session(*, readonly: bool = False):
         if not readonly:
             conn.rollback()
         raise
-    finally:
-        conn.close()
 
 
 @contextmanager
 def transaction():
-    """Write transaction under the global mutex. Never hold it across slow work (HTTP/streaming); only for DB steps that must be atomic."""
+    """Write transaction under the global mutex. Never hold it across slow work (HTTP/streaming); only for DB steps that must be atomic.
+
+    The mutex is still the thing that makes read-pick-write-state race-free; what
+    changed is only that the connection is reused instead of reopened, which
+    removes the per-transaction checkpoint (19.433 ms -> 0.084 ms measured).
+    """
     with _WRITE_LOCK:
-        conn = connect()
+        conn = _persistent(readonly=False)
         try:
             conn.execute("BEGIN IMMEDIATE")
             yield conn
@@ -103,8 +226,6 @@ def transaction():
         except Exception:
             conn.rollback()
             raise
-        finally:
-            conn.close()
 
 
 def query(sql: str, params: Sequence[Any] = (), *, readonly: bool = True) -> list[sqlite3.Row]:

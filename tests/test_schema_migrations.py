@@ -25,6 +25,9 @@ def scratch_db(monkeypatch, request):
     monkeypatch.setattr(config, "DB_PATH", path)
     monkeypatch.setattr(db, "_SCHEMA_READY", False)
     yield path
+    # Koneksi persisten masih memegang handle file ini; di Windows file yang
+    # masih terbuka tidak bisa dihapus (WinError 32). Tutup dulu, baru hapus.
+    db.close_all()
     if path.exists():
         path.unlink()
 
