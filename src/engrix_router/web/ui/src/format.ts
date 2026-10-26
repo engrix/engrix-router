@@ -1,21 +1,37 @@
 // Formatter = satu-satunya tempat yang boleh mengubah angka jadi teks. Aturan
 // TASK-43: tidak ada data mentah / ambigu di layar operator -- setiap nilai
 // punya format eksplisit, unit, dan konteks waktu.
+//
+// Locale: parameter `locale` tetap diterima (pemanggil yang butuh format
+// tertentu boleh memaksa), TAPI default-nya sekarang locale yang sedang aktif
+// di katalog, bukan "en". Dulu setiap call site yang lupa mengoper locale
+// menghasilkan tanggal/angka Inggris di UI berbahasa Indonesia -- dan karena
+// ada ~40 call site, memperbaiki satu per satu berarti mengulang bug yang sama.
+// Satu default di sini memperbaiki semuanya sekaligus.
+
+import { currentLocale } from "./i18n";
 
 export type LocaleTag = "en" | "id";
 
-// locale aktif untuk Intl: label "ID" di UI berarti katalog id.json, jadi
-// pemformatan angka juga ikut (ribuan pakai titik vs koma dibedakan Intl).
+// Locale efektif untuk Intl. Katalog kita cuma punya dua bahasa; apa pun
+// selain "id" diperlakukan sebagai "en" supaya Intl tidak menerima tag asing.
+function activeLocale(explicit?: LocaleTag | string | null): string {
+  const tag = explicit || currentLocale();
+  return tag === "id" ? "id-ID" : "en-GB";
+}
+
+// label "ID" di UI berarti katalog id.json, jadi pemformatan angka juga ikut
+// (ribuan pakai titik vs koma dibedakan Intl).
 export function num(n: number | null | undefined, locale?: LocaleTag): string {
   if (n === null || n === undefined) return "—";
-  return new Intl.NumberFormat(locale || "en", { maximumFractionDigits: 2 }).format(n);
+  return new Intl.NumberFormat(activeLocale(locale), { maximumFractionDigits: 2 }).format(n);
 }
 
 // Uang vendor: selalu USD, dua sampai enam desimal signifikan -- gateway tidak
 // pernah menebak harga, angka 0 harus terbaca "$0" bukan hilang.
 export function money(n: number | null | undefined, locale?: LocaleTag): string {
   if (n === null || n === undefined) return "—";
-  const v = new Intl.NumberFormat(locale || "en", {
+  const v = new Intl.NumberFormat(activeLocale(locale), {
     style: "currency", currency: "USD",
     minimumFractionDigits: 2, maximumFractionDigits: n > 0 && n < 0.01 ? 6 : 2,
   }).format(n);
@@ -28,7 +44,7 @@ export function clock(ms: number | string | null | undefined, locale?: LocaleTag
   if (ms === null || ms === undefined || ms === "") return "—";
   const d = typeof ms === "number" ? new Date(ms) : new Date(String(ms));
   if (Number.isNaN(d.getTime())) return String(ms);
-  return d.toLocaleString(locale === "id" ? "id-ID" : "en-GB", { hour12: false });
+  return d.toLocaleString(activeLocale(locale), { hour12: false });
 }
 
 // Countdown "in 21d 12h 3m" (contoh user): dipangkas dari unit terbesar supaya
@@ -47,6 +63,22 @@ export function dcount(ms: number | string | null | undefined, nowMs = Date.now(
   const h = Math.floor(s / 60); if (h < 24) return h + "h " + (m % 60) + "m";
   const d = Math.floor(h / 24);
   return d + "d " + (h % 24) + "h " + (m % 60) + "m";
+}
+
+// Umur snapshot kuota: "12s" / "3m" / "2h". Dipakai untuk memberi tahu operator
+// seberapa basi angka yang sedang dibacanya -- sebelumnya hanya ada `fetched_at`
+// mentah dan tidak ada satu pun label umur.
+export function age(ms: number | string | null | undefined, nowMs = Date.now()): string {
+  if (ms === null || ms === undefined || ms === "") return "—";
+  const epoch = typeof ms === "number" ? ms : new Date(ms).getTime();
+  if (!Number.isFinite(epoch)) return "—";
+  const s = Math.max(0, Math.round((nowMs - epoch) / 1000));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h";
+  return Math.floor(h / 24) + "d";
 }
 
 // Band aman kuota: thresholds diproklamasikan di katalog (ui.band_*) supaya

@@ -13,6 +13,9 @@
 :root {
   --bg: #ffffff;
   --bg-elevated: #fbfaf8;
+  /* hover wash: sits between --bg and --surface so a hovered row is
+     visible without looking like a selected row. */
+  --bg-soft: #f0eee8;
   --surface: #f4f3ef;
   --surface-hi: #edece6;
   --surface-3: #e4e3db;
@@ -56,6 +59,7 @@
 html[data-theme="dark"] {
   --bg: #0b0f14;
   --bg-elevated: #0e141b;
+  --bg-soft: #141c26;
   --surface: #121821;
   --surface-hi: #18212d;
   --surface-3: #1d2836;
@@ -375,8 +379,8 @@ html[data-theme="light"] img.theme-dark { display: none; }
 /* Saklar on/off akun: satu ketuk, tanpa buka form edit. */
 .switch {
   position: relative;
-  width: 34px;
-  height: 18px;
+  width: 40px;
+  height: 24px;
   padding: 0;
   border-radius: 999px;
   border: 1px solid var(--border-strong);
@@ -389,14 +393,14 @@ html[data-theme="light"] img.theme-dark { display: none; }
   position: absolute;
   top: 1px;
   left: 1px;
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: var(--text-faint);
   transition: left 120ms ease, background 120ms ease;
 }
 .switch.on { background: var(--emerald-soft); border-color: var(--emerald); }
-.switch.on .knob { left: 17px; background: var(--emerald); }
+.switch.on .knob { left: 21px; background: var(--emerald); }
 .switch:disabled { opacity: 0.55; cursor: progress; }
 .switch:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
 
@@ -418,3 +422,26 @@ html[data-theme="light"] img.theme-dark { display: none; }
 .settings-group-name { font-weight: 600; font-size: 13px; }
 .settings-group table { margin: 0; }
 .settings-group thead th { background: transparent; }
+
+/* ── operator controls: pager, panel close, account toolbar ── */
+/* Panel hasil (katalog/OAuth/test models/trace) harus bisa ditutup:
+   sebelumnya tidak ada satu pun jalan keluar selain pindah tab. */
+.panel-close { margin-left: auto; }
+
+/* Paginasi daftar akun: satu baris tombol, bukan deretan selebar layar. */
+.pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0 0; }
+.pager .spacer { flex: 1 1 auto; }
+
+/* Toolbar filter di atas daftar: input + urutan + hitungan, satu baris. */
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0 0 8px; }
+.toolbar .grow { flex: 1 1 180px; }
+
+/* Hitungan hasil filter: angka yang berubah saat operator mengetik. */
+.result-count { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
+
+/* Target sentuh minimum untuk tombol baris akun (WCAG 2.2 = 24x24). */
+button.tiny, .acct-actions button { min-height: 24px; }
+
+/* Badge status yang bisa diklik untuk memfilter (bukan hiasan). */
+button.badge-filter { border: 1px solid transparent; background: none; cursor: pointer; padding: 0 2px; }
+button.badge-filter[aria-pressed="true"] { border-color: var(--border-strong); border-radius: var(--radius-sm); }
