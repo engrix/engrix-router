@@ -268,6 +268,41 @@ def test_stage_trace_dipotong_dengan_penanda():
     assert stage["original_bytes"] > len(stage["payload_json"])
 
 
+def test_tail_yang_kehilangan_kepala_ditandai_terpotong():
+    """Pemanggil yang memotong lebih dulu wajib menyerahkan ukuran ASLI.
+
+    Kegagalan nyata yang pernah terjadi: `_tail()` mengambil 4000 byte terakhir dari
+    stream 4269 byte, lalu `stage()` mengukur teks yang sudah dipotong itu dan
+    menyimpulkan `truncated=0`. Trace jadi mengklaim "payload lengkap" padahal
+    kepalanya hilang -- justru bagian yang dibaca operator saat debug.
+    """
+    from engrix_router.subscribers import trace as trace_store
+
+    recorder = trace_store.begin("/v1/chat/completions")
+    recorder.bind_target(provider="unit", model="m")
+    full = "data: " + ("x" * 9000)
+    recorder.stage(trace_store.STEP_CLIENT_OUT, full[-4000:], direction="out",
+                   original_size=len(full.encode("utf-8")))
+    stage = next(s for s in trace_store.get(recorder.request_id)["stages"]
+                 if s["name"] == "client_out")
+    assert stage["truncated"] == 1
+    assert stage["original_bytes"] == len(full.encode("utf-8"))
+    assert stage["original_bytes"] > len(stage["payload_json"])
+
+
+def test_stage_tanpa_original_size_tetap_menandai_payload_besar():
+    """Jalur lama (tanpa original_size) tidak boleh kehilangan perilakunya."""
+    from engrix_router.subscribers import trace as trace_store
+
+    recorder = trace_store.begin("/v1/chat/completions")
+    recorder.bind_target(provider="unit", model="m")
+    recorder.stage(trace_store.STEP_PROVIDER_OUT, {"blob": "y" * 200_000}, direction="out")
+    stage = next(s for s in trace_store.get(recorder.request_id)["stages"]
+                 if s["name"] == "provider_out")
+    assert stage["truncated"] == 1
+    assert stage["original_bytes"] > len(stage["payload_json"])
+
+
 def test_finish_mencatat_usage_dan_rollup_harian():
     from engrix_router.storage.sqlite import query_one
     from engrix_router.subscribers import trace as trace_store

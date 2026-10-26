@@ -631,7 +631,9 @@ async def stream_frames(body: dict[str, Any], *, api_key_id: str | None = None,
         if frame.get("__error__"):
             status = int(frame.get("status") or 502)
             emitted.append(render({"error": frame}))
-            trace.stage(trace_mod.STEP_CLIENT_OUT, _tail(emitted), direction="out")
+            _tail_text, _tail_size = _tail(emitted)
+            trace.stage(trace_mod.STEP_CLIENT_OUT, _tail_text, direction="out",
+                        original_size=_tail_size)
             trace.finish(status=trace_mod.STATUS_UPSTREAM_ERROR, http_out=status,
                          error_class=str(frame.get("code")), error_text=str(frame.get("message")),
                          upstream_status=frame.get("upstream_status"), error_code=frame.get("vendor_code"))
@@ -650,7 +652,9 @@ async def stream_frames(body: dict[str, Any], *, api_key_id: str | None = None,
                              usage=usage_mod.as_client_usage_payload(usage))
     emitted.append(render(trailer))
     yield trailer
-    trace.stage(trace_mod.STEP_CLIENT_OUT, _tail(emitted), direction="out")
+    _tail_text, _tail_size = _tail(emitted)
+    trace.stage(trace_mod.STEP_CLIENT_OUT, _tail_text, direction="out",
+                original_size=_tail_size)
     result = trace.finish(status=trace_mod.STATUS_DRY_RUN if trace.dry_run else trace_mod.STATUS_OK,
                           http_out=200, usage=usage,
                           usage_source="upstream" if trace.usage else "estimated")
@@ -694,8 +698,16 @@ def stream_chat(body: dict[str, Any], *, api_key_id: str | None = None, lane: st
                                     render=openai_frame))
 
 
-def _tail(lines: list[str], limit: int = 4000) -> str:
-    return "".join(lines)[-limit:]
+def _tail(lines: list[str], limit: int = 4000) -> tuple[str, int]:
+    """Return the tail kept for the trace PLUS the size before anything was cut.
+
+    The store cuts to keep the row small, but it can only report `truncated` honestly
+    if it knows how much was there first. Passing only the cut text made the store
+    measure the cut and conclude "nothing was lost" -- a 4000-byte tail of a 4269-byte
+    stream was recorded as complete.
+    """
+    full = "".join(lines)
+    return full[-limit:], len(full.encode("utf-8", "replace"))
 
 
 def _estimated_usage(body: dict[str, Any], trace: trace_mod.RequestTrace) -> dict[str, int]:

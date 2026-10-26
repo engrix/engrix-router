@@ -120,7 +120,9 @@ class RequestTrace:
         self._pending_connection = (connection_id, proxy_pool_id)
 
     # ── stages ───────────────────────────────────────────────────────────────
-    def stage(self, step: int, payload: Any, *, direction: str, model_hint: str | None = None) -> None:
+    def stage(self, step: int, payload: Any, *, direction: str,
+              model_hint: str | None = None,
+              original_size: int | None = None) -> None:
         if not settings.get_bool("observability.enabled"):
             return
         if isinstance(payload, (bytes, bytearray)):
@@ -133,13 +135,19 @@ class RequestTrace:
             except (TypeError, ValueError):
                 text = str(payload)
         limit = settings.get_int("observability.max_stage_bytes")
-        size = len(text.encode("utf-8", "replace"))
-        truncated = 1 if size > limit else 0
-        stored = text[:limit] if truncated else text
+        stored = text[:limit]
+        stored_bytes = len(stored.encode("utf-8", "replace"))
+        # # Pemanggil boleh menyerahkan ukuran ASLI sebelum teksnya dipotong
+        # # lebih dulu (jalur stream hanya menyimpan ekornya). Tanpa itu stage()
+        # # mengukur teks yang sudah cacat dan menandai truncated=0 untuk payload
+        # # yang jelas kehilangan kepalanya -- trace lalu berbohong "lengkap".
+        full_size = original_size if original_size is not None else len(
+            text.encode("utf-8", "replace"))
+        truncated = 1 if full_size > stored_bytes else 0
         # Ditahan di memori; finish() menulis semuanya dalam satu transaksi.
         self._stages.append(
             (self.request_id, step, _STEP_NAMES.get(step, f"step{step}"), direction, stored,
-             min(size, limit), truncated, size if truncated else None, now_ms())
+             stored_bytes, truncated, full_size if truncated else None, now_ms())
         )
 
     def flush(self) -> None:
