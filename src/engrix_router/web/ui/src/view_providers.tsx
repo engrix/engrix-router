@@ -4,7 +4,7 @@
 // Edit/Delete, dan blok kuota akun itu sendiri. Tidak ada tabel mentah:
 // semua nilai lewat label katalog + formatter.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, quotaSnapshot, token } from "./api";
 import { fmt, t } from "./i18n";
 import { dcount, num, short } from "./format";
@@ -16,12 +16,18 @@ import type {
   PoolRow, ProviderDef, QuotaSnapshot,
 } from "./types";
 
+// Baris akun yang dirender sekaligus. 50 cukup untuk membaca satu layar penuh
+// tanpa scroll jauh, dan tetap memberi tombol "muat lagi" untuk sisanya --
+// jauh lebih murah daripada membuat 500 baris DOM lalu membuang 450.
+const PAGE = 50;
+
 type Panel = { kind: "catalog"; brand: string; title: string; body: React.ReactNode }
   | { kind: "oauth"; brand: string; url: string; status: string; done: boolean }
   | { kind: "models"; brand: string; title: string; rows: ModelTestRow[] }
   | null;
 
 export function ProvidersView(props: {
+  refreshKey?: number;
   focusBrand?: string;
   onOpenBrand: (brand: string) => void;
   onBack: () => void;
@@ -33,10 +39,13 @@ export function ProvidersView(props: {
   const [pools, setPools] = useState<PoolRow[]>([]);
   const [panel, setPanel] = useState<Panel>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [bulkMsg, setBulkMsg] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(0);
   const pollRef = useRef<number | null>(null);
+  // Draft edit yang sedang terbuka: auto-refresh TIDAK boleh menimpanya.
+  const editingRef = useRef(false);
 
   async function reload(force = false) {
     try {
@@ -49,20 +58,30 @@ export function ProvidersView(props: {
       setProviders(p); setConns(c); setQuota(q); setPools(pl); setErr(null);
     } catch (e) {
       setErr((e as ApiError).message);
+    } finally {
+      setLoading(false);
     }
   }
+  // refreshKey: tombol Refresh di topbar dulu TIDAK memuat ulang view ini --
+  // satu-satunya view yang tidak bereaksi, jadi operator melihat angka lama
+  // sambil mengira sudah diperbarui.
   useEffect(() => {
-    reload();
+    void reload();
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [props.refreshKey]);
 
   // Auto-refresh (padanan "Auto-refresh" di Quota Tracker 9router): muat ulang
   // kuota + koneksi tiap N detik. force=true supaya angka di layar benar-benar
   // segar, bukan cache 25 detik -- tombol ini memang buat dipantau dari jauh.
+  // Dilewati selama operator sedang mengedit: reload akan menimpa nilai yang
+  // sedang diketik dan simpan berikutnya menulis balik data basi.
   useEffect(() => {
     if (!autoRefresh) return;
-    const timer = window.setInterval(() => { void reload(true); }, autoRefresh * 1000);
+    const timer = window.setInterval(() => {
+      if (editingRef.current) return;
+      void reload(true);
+    }, autoRefresh * 1000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefresh]);
@@ -155,8 +174,22 @@ export function ProvidersView(props: {
   // aksi dijalankan per id lalu dijumlah. Aksi berbasis kuota menilai dari
   // snapshot terbaru (sama seperti yang barusan dibaca di tracker), bukan panggilan
   // vendor baru -- lihat catatan di api/admin_connections.py bulk_connections.
+  //
+  // Konfirmasi: dulu HANYA "deactivate" yang dikonfirmasi. Tiga aksi lain
+  // menyalakan/mematikan seluruh akun satu merek tanpa daftar akun dan tanpa
+  // undo -- satu klik salah = ratusan akun berubah status. Sekarang setiap aksi
+  // massal menyebut berapa akun yang akan tersentuh, dan aksi berbasis kuota
+  // memperingatkan bahwa angkanya snapshot (bisa 25 detik basi).
   async function runBulk(action: string, providerIds: string[]) {
-    if (action === "deactivate" && !window.confirm(t("bulk.all_off_confirm"))) return;
+    const brand = providerIds.map(id => brandOf(id)).filter((v, i, a) => a.indexOf(v) === i).join(", ") || "—";
+    const n = providerIds.reduce((sum, id) => sum + (byProv[id] || []).length, 0);
+    const ask: Record<string, string> = {
+      deactivate: t("bulk.all_off_confirm"),
+      activate: fmt("bulk.confirm_activate", { n, brand }),
+      activate_available: fmt("bulk.confirm_activate_available", { n, brand }),
+      deactivate_empty: fmt("bulk.confirm_deactivate_empty", { n, brand }),
+    };
+    if (ask[action] && !window.confirm(ask[action])) return;
     setBulkBusy(true); setBulkMsg(null);
     let changed = 0, unchanged = 0, noQuota = 0, total = 0;
     try {
@@ -223,11 +256,19 @@ export function ProvidersView(props: {
       {/* Mode daftar = GRID kartu bermerek (logo + status akun), bukan baris teks:
           mata langsung nemu vendor mana yang nyambung tanpa baca satu per satu.
           Klik kartu = halaman merek itu (route providers/<brand>). */}
-      {!focus && (
+      {!focus && loading && (
+        <p className="muted tiny">{t("ui.busy")}</p>
+      )}
+      {!focus && !loading && (
         <div className="brand-grid">
           {brands.map(([brand, defs]) => {
             const acctCount = defs.reduce((n, d) => n + (byProv[d.id] || []).length, 0);
             const onlineCount = defs.reduce((n, d) => n + (d.active_connections || 0), 0);
+            // Band dot = keadaan sebenarnya, bukan "ada akun atau tidak".
+            //   ok   : ada akun aktif
+            //   mid  : semua akun ada tapi tidak satu pun aktif (dijeda/cooling)
+            //   na   : tidak ada akun sama sekali
+            const tileBand = onlineCount > 0 ? "ok" : acctCount > 0 ? "mid" : "na";
             const models = new Set(defs.flatMap(d => d.models_named.map(m => m.name || m.id)));
             const logoId = _logoProviderId(brand, defs);
             return (
@@ -239,9 +280,16 @@ export function ProvidersView(props: {
                   <span className="brand-tile-caret">▸</span>
                 </span>
                 <span className="brand-tile-status">
+                  {/* Dot dulu hijau selama ada akun, tanpa peduli akunnya aktif
+                      atau tidak: merek yang SEMUA akunnya dijeda/error tetap
+                      terlihat sehat. Sekarang warnanya mengikuti keadaan
+                      sebenarnya, dan angkanya menyebut aktif vs total. */}
                   {acctCount > 0
-                    ? <><span className="dot ok" aria-hidden="true" />{_accountsLabel(acctCount)}</>
-                    : <><span className="dot" aria-hidden="true" />{t("common.no_connections")}</>}
+                    ? <>
+                        <span className={"dot " + tileBand} aria-hidden="true" />
+                        {fmt("providers.counts", { active: onlineCount, total: acctCount })}
+                      </>
+                    : <><span className="dot na" aria-hidden="true" />{t("common.no_connections")}</>}
                 </span>
                 <span className="brand-tile-stats tiny muted">
                   {defs.length > 1 && <span>{fmt("providers.variants_n", { value: defs.length })}</span>}
@@ -280,7 +328,7 @@ export function ProvidersView(props: {
               />
             ))}
             {panel && panel.brand === brand && (
-              <PanelBox panel={panel} />
+              <PanelBox panel={panel} onClose={() => setPanel(null)} />
             )}
           </section>
         );
@@ -302,22 +350,21 @@ function _logoProviderId(_brand: string, defs: ProviderDef[]): string {
 
 // "1 accounts" kebaca seperti bug. Katalog string tetap satu sumber: bentuk jamak
 // hanya dipilih di sini, angkanya tetap dari katalog.
-function _accountsLabel(count: number): string {
-  return count === 1 ? t("providers.accounts_one") : fmt("providers.accounts_n", { value: count });
-}
-
 function _modelsLabel(count: number): string {
   return count === 1 ? t("providers.models_one") : fmt("providers.models_n", { value: count });
 }
 
 // Kotak hasil (katalog / tes model / OAuth+) -- dipindah ke dalam merek
 // pemiliknya supaya konteks tidak tercerai (dulu nyangkut di bawah semua kartu).
-function PanelBox(props: { panel: NonNullable<Panel> }) {
+function PanelBox(props: { panel: NonNullable<Panel>; onClose: () => void }) {
   const panel = props.panel;
   return (
     <Card
       inner
       title={panel.kind === "catalog" ? panel.title : panel.kind === "models" ? panel.title : t("conn.oauth_add")}
+      // Panel hasil dulu tidak punya jalan keluar sama sekali: satu-satunya cara
+      // menutupnya adalah pindah tab, dan itu membuang konteks yang sedang dibaca.
+      tools={<button className="tiny panel-close" onClick={props.onClose} aria-label={t("common.close")}>✕</button>}
     >
       {panel.kind === "oauth" && (
         <div>
@@ -365,6 +412,53 @@ function ProviderCard(props: {
 }) {
   const p = props.def;
   const [oauthBusy, setOauthBusy] = useState(false);
+
+  // Daftar akun dulu dirender SELURUHNYA tanpa batas: satu merek 500 akun =
+  // 15.021 node DOM dan halaman fokus setinggi 67.401 px, semuanya dibuat ulang
+  // setiap reload. Sekarang: cari + filter + urut di sisi klien (tanpa request
+  // baru, data sudah ada di memori), lalu tampilkan bertahap 50 baris.
+  const [q, setQ] = useState("");
+  const [onlyProblem, setOnlyProblem] = useState(false);
+  const [sortBy, setSortBy] = useState<"priority" | "name" | "status" | "used">("priority");
+  const [shown, setShown] = useState(PAGE);
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const rows = props.accounts.filter(c => {
+      if (needle) {
+        const hay = [c.name, c.email, c.id, c.priority, c.health?.test_status, c.health?.error_code]
+          .filter(Boolean).join(" ").toLowerCase();
+        if (!hay.includes(needle)) return false;
+      }
+      if (onlyProblem) {
+        const st = c.health?.test_status || "";
+        // "bermasalah" = tidak aktif DAN bukan sekadar belum pernah diuji.
+        if (st === "active" || st === "" || st === "unknown") return false;
+      }
+      return true;
+    });
+    const statusRank = (c: Connection) => {
+      const st = c.health?.test_status || "";
+      if (st === "active") return 0;
+      if (st === "" || st === "unknown") return 1;
+      return 2;
+    };
+    return rows.sort((a, b) => {
+      switch (sortBy) {
+        case "name": return (a.name || a.id).localeCompare(b.name || b.id);
+        case "status": return statusRank(a) - statusRank(b) || a.priority - b.priority;
+        case "used": return (b.health?.last_used_at || 0) - (a.health?.last_used_at || 0);
+        default: return a.priority - b.priority;
+      }
+    });
+  }, [props.accounts, q, onlyProblem, sortBy]);
+
+  // Reset paginasi saat filter berubah: kalau tidak, operator melihat "50 dari
+  // 12" setelah mempersempit pencarian.
+  useEffect(() => { setShown(PAGE); }, [q, onlyProblem, sortBy]);
+
+  const visible = filtered.slice(0, shown);
+
   return (
     <Card
       inner
@@ -401,9 +495,31 @@ function ProviderCard(props: {
         </div>
       )}
 
-      {!props.accounts.length && <EmptyState label={t("conn.no_accounts")} />}
+      {props.accounts.length > 0 && (
+        <div className="toolbar">
+          <input className="grow tiny-input" value={q} onChange={e => setQ(e.target.value)}
+            placeholder={t("common.search_ph")} aria-label={t("common.search")} />
+          <label className="tiny muted row tight">
+            <input type="checkbox" checked={onlyProblem} onChange={e => setOnlyProblem(e.target.checked)} />
+            {t("conn.filter_problem")}
+          </label>
+          <label className="tiny muted row tight">
+            {t("common.sort")}
+            <select value={sortBy} onChange={e => setSortBy(e.target.value as typeof sortBy)}>
+              <option value="priority">{t("conn.sort_priority")}</option>
+              <option value="name">{t("conn.sort_name")}</option>
+              <option value="status">{t("conn.sort_status")}</option>
+              <option value="used">{t("conn.sort_used")}</option>
+            </select>
+          </label>
+          <span className="result-count">{fmt("common.showing", { shown: visible.length, total: filtered.length })}</span>
+        </div>
+      )}
 
-      {props.accounts.map(c => (
+      {!props.accounts.length && <EmptyState label={t("conn.no_accounts")} />}
+      {props.accounts.length > 0 && !filtered.length && <EmptyState label={t("common.no_match")} />}
+
+      {visible.map(c => (
         <AccountRow
           key={c.id} c={c} pools={props.pools}
           readings={props.readings[c.id] || []}
@@ -412,6 +528,14 @@ function ProviderCard(props: {
           onReload={props.onReload}
         />
       ))}
+
+      {filtered.length > visible.length && (
+        <div className="pager">
+          <button className="tiny" onClick={() => setShown(n => n + PAGE)}>
+            {fmt("common.load_more", { n: Math.min(PAGE, filtered.length - visible.length) })}
+          </button>
+        </div>
+      )}
     </Card>
   );
 }
@@ -753,18 +877,31 @@ function BackupCard(props: { onDone: () => void }) {
       setNote({ text: t("backup.bad_shape"), err: true });
       return;
     }
+    // Konfirmasi: mode merge MENIMPA kredensial akun yang sudah ada (cocokkan
+    // id lalu provider+nama) dan dulu berjalan tanpa bertanya sama sekali --
+    // hanya "replace" yang dikonfirmasi, padahal justru merge yang menyentuh
+    // akun hidup. Sekarang keduanya dikonfirmasi dengan kalimat berbeda.
     if (mode === "replace" && !window.confirm(t("backup.replace_confirm"))) return;
+    if (mode === "merge" && !window.confirm(t("backup.merge_confirm"))) return;
     setBusy(true); setNote(null);
     try {
       const r = await api<BackupImportResult>("/api/backup/import", {
         method: "POST",
         body: JSON.stringify({ mode, connections, ...(mode === "replace" ? { confirm_replace: true } : {}) }),
       });
+      // Hasil impor menyebut angka DAN alasan penolakan per baris: dulu array
+      // `errors` dibuang dan operator hanya melihat "skipped: N" tanpa tahu
+      // baris mana yang gagal atau kenapa.
+      const detail = (r.errors || []).slice(0, 5)
+        .map(e => `#${e.index}${e.name ? " " + e.name : ""}: ${e.error}`).join(" · ");
       setNote({
-        text: fmt("backup.imported", { created: r.created, updated: r.updated, skipped: r.skipped }),
+        text: fmt("backup.imported", { created: r.created, updated: r.updated, skipped: r.skipped })
+          + (detail ? " — " + detail : ""),
         err: r.skipped > 0,
       });
-      if (r.created || r.updated) props.onDone();
+      // Textarea dibersihkan setelah impor berhasil: dulu klik "Impor" kedua
+      // mengimpor dokumen yang SAMA lagi tanpa peringatan.
+      if (r.created || r.updated) { setText(""); props.onDone(); }
     } catch (e) {
       setNote({ text: (e as ApiError).message, err: true });
     } finally {
