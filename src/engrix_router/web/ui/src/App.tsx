@@ -88,14 +88,22 @@ export default function App() {
     catch { /* respons bisa mati bersama server -- polling tetap lanjut */ }
     setRestartState("waiting"); setRestartMsg(t("system.restart_waiting"));
 
-    const UP_DEADLINE = Date.now() + 150000;   // batas total, bukan batas fase
+    // 150 detik = batas SABAR, bukan batas kegagalan. Helper jalan detached:
+    // dia bisa selesai setelah UI berhenti menunggu, dan memvonis "gagal" di
+    // sini adalah kebohongan yang sudah terjadi di room ini (restart sukses
+    // dilaporkan gagal). Kalau batas ini lewat, UI berhenti menunggu dan
+    // mengatakan APA YANG DIKETAHUI -- bukan menyimpulkan hasilnya.
+    const UP_DEADLINE = Date.now() + 150000;
     let sawDown = false;
     let lastStage = "";
 
     for (;;) {
       if (Date.now() > UP_DEADLINE) {
-        setRestartState("idle"); setRestartMsg(null);
-        setRestartErr(fmt("system.restart_timeout", { value: 150 }));
+        setRestartState("idle");
+        // Journal terakhir yang terbaca tetap ditampilkan: kalau helper masih
+        // di tahap "starting", itu informasi yang benar dan berguna.
+        setRestartMsg(null);
+        setRestartErr(fmt("system.restart_slow", { value: lastStage || t("system.restart_waiting") }));
         return;
       }
       await new Promise(r => setTimeout(r, 1000));
@@ -287,7 +295,10 @@ export default function App() {
         </div>
 
         {view === "overview" && <OverviewView refreshKey={refreshKey} />}
-        {view === "providers" && <ProvidersView focusBrand={focusBrand} onOpenBrand={openBrand} onBack={() => show("providers")} />}
+        {/* Providers dulu satu-satunya view TANPA refreshKey: tombol Refresh di
+            topbar tidak memuat ulang daftar akun, jadi operator melihat angka
+            lama sambil mengira sudah diperbarui. Semua view lain sudah dapat. */}
+        {view === "providers" && <ProvidersView refreshKey={refreshKey} focusBrand={focusBrand} onOpenBrand={openBrand} onBack={() => show("providers")} />}
         {view === "requests" && <RequestsView refreshKey={refreshKey} />}
         {view === "nodes" && <NodesView refreshKey={refreshKey} />}
         {view === "keys" && <KeysView refreshKey={refreshKey} />}

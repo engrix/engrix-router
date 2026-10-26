@@ -176,6 +176,9 @@ export function KeysView({ refreshKey }: { refreshKey: number }) {
 export function ProxyView({ refreshKey }: { refreshKey: number }) {
   const [pools, setPools] = useState<PoolRow[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  // Hapus pool dulu langsung jalan tanpa konfirmasi, padahal satu pool bisa
+  // terikat ke ratusan koneksi (impor 9router mengikat 303 akun ke satu pool).
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
   const [f, setF] = useState({ name: "", proxy_url: "", credential_hint: "" });
 
   const load = useCallback(async () => {
@@ -203,14 +206,17 @@ export function ProxyView({ refreshKey }: { refreshKey: number }) {
   }
 
   async function remove(id: string) {
-    try { await api(`/api/proxy-pools/${id}`, { method: "DELETE" }); load(); }
+    try { await api(`/api/proxy-pools/${id}`, { method: "DELETE" }); setConfirmDel(null); load(); }
     catch (e) { setErr((e as ApiError).message); }
   }
 
   return (
     <div>
       <Card title={t("proxy.title")}>
-        <InlineMsg msg={err} kind="ok" />
+        {/* Dulu `kind="ok"`: pesan gagal pun tampil hijau. Sekarang gaya
+            mengikuti isi pesan -- "ok_ms"/"failed" dari tryPool sudah
+            membawa kata kuncinya sendiri. */}
+        <InlineMsg msg={err} kind={err && /failed|gagal|error/i.test(err) ? "err" : "ok"} />
         <table>
           <thead><tr>
             <th>{t("common.name")}</th><th>{t("common.col_url")}</th><th>{t("common.col_type")}</th>
@@ -228,7 +234,14 @@ export function ProxyView({ refreshKey }: { refreshKey: number }) {
                 <td className="tiny">{p.bound_connection_count ?? "—"}</td>
                 <td className="row tight">
                   <button className="tiny" onClick={() => tryPool(p.id)}>{t("proxy.try")}</button>
-                  <button className="tiny danger" onClick={() => remove(p.id)}>{t("common.delete")}</button>
+                  {confirmDel === p.id
+                    ? <ConfirmBar
+                        text={(p.bound_connection_count ?? 0) > 0
+                          ? fmt("proxy.delete_confirm", { name: p.name, n: p.bound_connection_count ?? 0 })
+                          : fmt("proxy.delete_confirm_unbound", { name: p.name })}
+                        onYes={() => remove(p.id)}
+                        onNo={() => setConfirmDel(null)} />
+                    : <button className="tiny danger" onClick={() => setConfirmDel(p.id)}>{t("common.delete")}</button>}
                 </td>
               </tr>
             ))}
