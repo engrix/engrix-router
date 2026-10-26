@@ -19,6 +19,7 @@ import json
 from typing import Any
 
 from engrix_router.storage.sqlite import execute, now_iso, now_ms, query, query_one, transaction
+from engrix_router.core import errors
 from engrix_router.core import logs as applog
 from engrix_router.accounts import health
 from engrix_router.transport import proxy
@@ -274,6 +275,66 @@ def load_credentials(connection_id: str) -> Credentials | None:
     )
 
 
+def _locks_for(connection_ids: list[str], model: str, ts: int) -> dict[str, list[dict[str, Any]]]:
+    """Every live lock for these connections in ONE query.
+
+    Same predicate as health._locks_of (a lock on this model or a '*' lock on the
+    whole account), just not one round-trip per account. Chunked because SQLite
+    caps a statement at 999 host parameters on builds older than 3.32, and a
+    provider can hold 1500 accounts.
+    """
+    out: dict[str, list[dict[str, Any]]] = {}
+    for start in range(0, len(connection_ids), 500):
+        chunk = connection_ids[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = query(
+            f"SELECT connection_id, model, locked_until, reason FROM model_locks"  # noqa: S608 -- placeholders only
+            f" WHERE connection_id IN ({placeholders})"
+            f" AND locked_until > ? AND model IN ('*', ?)",
+            tuple(chunk) + (ts, model),
+        )
+        for row in rows:
+            out.setdefault(row["connection_id"], []).append(dict(row))
+    return out
+
+
+def _pools_for(pool_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Active proxy pools keyed by id, one query. Empty set -> no query at all."""
+    wanted = sorted({pid for pid in pool_ids if pid})
+    out: dict[str, dict[str, Any]] = {}
+    for start in range(0, len(wanted), 500):
+        chunk = wanted[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = query(
+            f"SELECT * FROM proxy_pools WHERE id IN ({placeholders}) AND is_active = 1",  # noqa: S608
+            tuple(chunk),
+        )
+        for row in rows:
+            out[row["id"]] = dict(row)
+    return out
+
+
+def _credentials_from_row(row: dict[str, Any], pool: dict[str, Any] | None) -> Credentials:
+    """Build Credentials from a row already in memory -- no query, no re-read."""
+    cred = _load(row["cred_json"])
+    psd = _load(row["psd_json"])
+    token = cred.get("access_token") or cred.get("api_key") or ""
+    expires_at = cred.get("expires_at") or tokens.expiry_iso(tokens.decode_claims(token))
+    proxy_url, strict = proxy.resolve_with_pool(row["proxy_pool_id"], psd, pool)
+    return Credentials(
+        connection_id=row["id"],
+        provider=row["provider"],
+        auth_type=row["auth_type"],
+        name=row["name"] or row["email"] or row["id"][:8],
+        token=token or None,
+        refresh_token=cred.get("refresh_token"),
+        expires_at=expires_at,
+        psd=psd,
+        proxy_url=proxy_url,
+        proxy_strict=strict,
+    )
+
+
 def candidates(definition: ProviderDef, model: str, *, exclude: set[str] | None = None,
                ts: int | None = None) -> tuple[list[Candidate], list[dict[str, Any]]]:
     """
@@ -285,39 +346,92 @@ def candidates(definition: ProviderDef, model: str, *, exclude: set[str] | None 
     is unknown, the client already got a 404. Ordering comes from the
     connections table; the selection strategy lives in routing/selector.py.
 
+    Four queries TOTAL, not four per account. The per-account version opened a
+    fresh SQLite connection for every health read, lock read and credential load:
+    measured on a 10x150 fleet, picking one account cost 601 connections and 1051
+    statements, p50 1796 ms, and 50 concurrent pickers collapsed to 2 picks/s.
+    Every rule below is still the one health.py owns -- only the fetching changed,
+    and health.many() supplies the same defaults get() synthesises so a caller
+    cannot tell the two paths apart.
     """
+    moment = now_ms() if ts is None else ts
+    skip_excluded = exclude or set()
+
     rows = query(
-        "SELECT id, priority FROM connections WHERE provider = ? AND is_active = 1"
-        " ORDER BY priority, created_at",
+        "SELECT id, priority, provider, auth_type, name, email, cred_json, psd_json, proxy_pool_id"
+        " FROM connections WHERE provider = ? AND is_active = 1 ORDER BY priority, created_at",
         (definition.id,),
     )
-    skip_excluded = exclude or set()
+    if not rows:
+        return [], []
+
+    ids = [row["id"] for row in rows]
+    states = health.many(ids)
+    locks = _locks_for(ids, model, moment)
+    pools = _pools_for([row["proxy_pool_id"] for row in rows])
+
     ok: list[Candidate] = []
     skipped: list[dict[str, Any]] = []
+
     for row in rows:
         connection_id = row["id"]
         if connection_id in skip_excluded:
             skipped.append({"connection_id": connection_id, "reason": "already tried in this request"})
             continue
-        if not health.is_available(connection_id, model, ts=ts):
-            reason = health.locked_reason(connection_id, model, ts=ts) or {}
+
+        state = states[connection_id]
+        account_locks = locks.get(connection_id, [])
+        wildcard_locked = any(item["model"] == health.ACCOUNT_WILDCARD for item in account_locks)
+
+        # Aturan 1: status pemblokir. Sama persis dengan health.is_available(),
+        # hanya saja satu putaran seleksi TIDAK boleh MENULIS baris health untuk
+        # akun yang cuma sedang dipertimbangkan -- update self-heal tetap di jalur
+        # tulis health.
+        if state["test_status"] in health.BLOCKING_STATUSES:
+            healable = False
+            if (state["test_status"] == health.STATUS_NEEDS_REAUTH
+                    and state["error_class"] == errors.CLASS_ACCOUNT_RESTRICTED):
+                healable = not wildcard_locked
+            elif state["test_status"] == health.STATUS_UNAVAILABLE:
+                rate_ok = not (state["rate_limited_until"] and state["rate_limited_until"] > moment)
+                healable = (health.get_bool("health.self_heal_unavailable") and rate_ok
+                            and not wildcard_locked)
+            if not healable:
+                skipped.append({
+                    "connection_id": connection_id,
+                    "reason": f"locked/{state['test_status']}",
+                    "until_ms": state["rate_limited_until"],
+                })
+                continue
+
+        # Aturan 2: jendela rate-limit.
+        limited_until = state["rate_limited_until"]
+        if limited_until and limited_until > moment:
             skipped.append({
                 "connection_id": connection_id,
-                "reason": f"locked/{reason.get('reason', 'unhealthy')}",
-                "until_ms": reason.get("locked_until"),
+                "reason": f"locked/{state['error_class'] or 'rate_limited'}",
+                "until_ms": limited_until,
             })
             continue
-        creds = load_credentials(connection_id)
-        if creds is None:
-            skipped.append({"connection_id": connection_id, "reason": "koneksi hilang"})
+
+        # Aturan 3: kunci model (model ini, atau '*' yang menutup seluruh akun).
+        if account_locks:
+            worst = max(account_locks, key=lambda item: item["locked_until"])
+            skipped.append({
+                "connection_id": connection_id,
+                "reason": f"locked/{worst.get('reason') or 'locked'}",
+                "until_ms": worst["locked_until"],
+            })
             continue
+
+        creds = _credentials_from_row(row, pools.get(row["proxy_pool_id"]))
         if creds.is_expired:
             skipped.append({"connection_id": connection_id, "reason": "token expired (re-auth needed)"})
             continue
         if not creds.token and creds.auth_type != "none":
             skipped.append({"connection_id": connection_id, "reason": "credentials are empty"})
             continue
-        state = health.get(connection_id)
+
         ok.append(
             Candidate(
                 credentials=creds,

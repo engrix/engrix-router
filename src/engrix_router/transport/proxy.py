@@ -112,8 +112,14 @@ def _attach_credentials(pool: dict[str, Any]) -> str:
     return f"{scheme}://{secret}@{host}{port}"
 
 
-def resolve(proxy_pool_id: str | None, psd: dict[str, Any] | None = None) -> tuple[str | None, bool]:
-    """(url, strict). psd may override: connectionProxyEnabled=false = off."""
+def resolve_with_pool(proxy_pool_id: str | None, psd: dict[str, Any] | None,
+                      pool: dict[str, Any] | None) -> tuple[str | None, bool]:
+    """(url, strict) using a pool row the caller ALREADY loaded.
+
+    Split out of resolve() so the routing hot path -- which loads every pool for a
+    provider in one query -- does not pay a round-trip per account. The rules stay
+    in this one place; resolve() is now the thin wrapper that fetches the row.
+    """
     psd = psd or {}
     if psd.get("proxy_enabled") is False:
         return None, False
@@ -122,7 +128,6 @@ def resolve(proxy_pool_id: str | None, psd: dict[str, Any] | None = None) -> tup
         return _validate_shape(override), bool(psd.get("proxy_strict", False))
     if not proxy_pool_id:
         return None, False
-    pool = get(proxy_pool_id)
     if pool is None or not pool["is_active"]:
         enabled = bool(psd.get("proxy_required", False))
         if enabled:
@@ -136,6 +141,13 @@ def resolve(proxy_pool_id: str | None, psd: dict[str, Any] | None = None) -> tup
         applog.warn(applog.NS_PROXY, f"pool {pool['name']}: credentials missing, continuing without proxy")
         return None, False
     return url, bool(pool["strict_proxy"])
+
+
+def resolve(proxy_pool_id: str | None, psd: dict[str, Any] | None = None) -> tuple[str | None, bool]:
+    """(url, strict). psd may override: connectionProxyEnabled=false = off."""
+    if not proxy_pool_id:
+        return resolve_with_pool(proxy_pool_id, psd, None)
+    return resolve_with_pool(proxy_pool_id, psd, get(proxy_pool_id))
 
 
 def record_test_result(pool_id: str, *, ok: bool, error: str | None = None,
