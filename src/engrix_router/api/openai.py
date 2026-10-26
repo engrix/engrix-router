@@ -72,7 +72,12 @@ async def chat_completions(request: Request,
             # # frame pertama sudah error (tidak ada akun yang bisa melayani),
             # # menjawab 200 + body error bikin SDK klien melihat "sukses dengan
             # # jawaban kosong" -- penyebab aslinya tidak pernah sampai ke mereka.
-            frames = runner.stream_frames(body, api_key_id=api_key_id, lane=lane)
+            # # render= itu wajib, bukan hiasan: stream_frames nyatet byte yang
+            # # dilihat klien lewat situ. Dulu argumennya ketinggalan pas jalur ini
+            # # pindah dari stream_chat(), jadi SEMUA request streaming mati
+            # # TypeError sebelum frame pertama ada -- dan peek-nya gak pernah jalan.
+            frames = runner.stream_frames(body, api_key_id=api_key_id, lane=lane,
+                                          render=runner.openai_frame)
             first, frames = await runner.head_frame(frames)
             if first is not None and first.get("__error__"):
                 return _error_response(runner.RequestRejected(

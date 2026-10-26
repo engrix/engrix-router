@@ -657,17 +657,31 @@ async def stream_frames(body: dict[str, Any], *, api_key_id: str | None = None,
     _log_done(trace, result)
 
 
+def openai_frame(frame: dict[str, Any]) -> str:
+    """One canonical frame -> the exact OpenAI bytes the client reads.
+
+    Two consumers share it and must not drift apart: `sse_frames` writes these bytes
+    to the socket, and `render=` hands the same bytes to the trace.
+    """
+    # # Satu renderer, dua pemakai. Dulu frame error dirender beda di sini dan di
+    # # sse_frames (yang ngirim error_frame + [DONE], sementara trace nyatet
+    # # json-nya doang), jadi trace nyimpen byte yang gak pernah sampai ke klien.
+    if frame.get("__error__"):
+        return openai_fmt.error_frame(str(frame.get("message") or "upstream error"),
+                                      code=str(frame.get("code") or errors.CLASS_UNKNOWN),
+                                      status=int(frame.get("status") or 502),
+                                      note=frame.get("note"))
+    return openai_fmt.sse(frame)
+
+
 def sse_frames(frames: AsyncIterator[dict[str, Any]]) -> AsyncIterator[str]:
     """Render canonical frames as OpenAI SSE strings, ending with [DONE]."""
     async def render() -> AsyncIterator[str]:
         async for frame in frames:
+            yield openai_frame(frame)
             if frame.get("__error__"):
-                yield openai_fmt.error_frame(str(frame.get("message") or "upstream error"),
-                                             code=str(frame.get("code") or errors.CLASS_UNKNOWN),
-                                             status=int(frame.get("status") or 502),
-                                             note=frame.get("note"))
+                # error_frame() udah nutup sendiri pakai [DONE]; jangan dikirim dua kali
                 return
-            yield openai_fmt.sse(frame)
         yield openai_fmt.SSE_DONE
 
     return render()
@@ -677,7 +691,7 @@ def stream_chat(body: dict[str, Any], *, api_key_id: str | None = None, lane: st
                 endpoint: str = "/v1/chat/completions") -> AsyncIterator[str]:
     """Streaming path in the OpenAI wire format: yields SSE strings, ends with [DONE]."""
     return sse_frames(stream_frames(body, api_key_id=api_key_id, lane=lane, endpoint=endpoint,
-                                    render=openai_fmt.sse))
+                                    render=openai_frame))
 
 
 def _tail(lines: list[str], limit: int = 4000) -> str:

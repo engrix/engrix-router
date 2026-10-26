@@ -15,6 +15,8 @@ reports, and a provider with no usable connection must not be listed.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from engrix_router.api import openai as openai_api
@@ -122,3 +124,124 @@ def test_is_usable_allows_a_row_without_health_record():
             {"id": "c1", "health": {"test_status": health_mod.STATUS_UNKNOWN}}) is True
     finally:
         openai_api.connections.load_credentials = original
+
+
+# ------------------------------------------- the route still streams at all
+
+
+@pytest.fixture(autouse=True)
+def _clean_limiter():
+    """These tests drive the whole route, so the per-provider window is shared state.
+
+    Without this the second request in the same minute is refused with 429 and the
+    test reads as a routing bug rather than the limiter doing its job.
+    """
+    from engrix_router.hooks import ratelimit
+
+    ratelimit.reset()
+    yield
+    ratelimit.reset()
+
+
+@pytest.fixture
+def client_key():
+    from engrix_router.identity import api_keys
+
+    created = api_keys.create_key("stream-route-test")
+    return {"authorization": f"Bearer {created['key']}"}
+
+
+@pytest.fixture
+def connection():
+    """Routing needs a candidate: with no connection the route answers 503 by design."""
+    from engrix_router.accounts import connections
+
+    return connections.create(provider="anthropic", name="stream-acct", api_key="sk-test")
+
+
+def test_chat_completions_route_actually_streams(monkeypatch, client_key, connection):
+    """The peek must not have cost the route its renderer.
+
+    Regression: the route was changed from `runner.stream_chat(...)` to a direct
+    `runner.stream_frames(...)` to be able to peek the first frame, and the
+    `render=` argument came with it. `stream_frames` requires it, so EVERY
+    streaming request died with a TypeError before the first frame existed and
+    the client got "internal gateway error" -- the peek never even ran. Nothing
+    below the route was exercised by the tests that shipped with that change.
+    """
+    from fastapi.testclient import TestClient
+
+    from engrix_router.core.formats import openai as openai_fmt
+    from engrix_router.providers import anthropic as anthropic_provider
+    from engrix_router.web import server
+
+    async def fake_stream(self, request):
+        for delta, finish in (({"role": "assistant", "content": "HEL"}, None),
+                              ({"content": "LO"}, None),
+                              ({}, "stop")):
+            yield openai_fmt.chunk(rid="r", model="claude-x", created=1,
+                                   delta=delta, finish_reason=finish)
+
+    monkeypatch.setattr(anthropic_provider.AnthropicProvider, "open_stream", fake_stream)
+    with TestClient(server.app) as client:
+        with client.stream("POST", "/v1/chat/completions", headers=client_key, json={
+                "model": "anthropic/claude-x", "stream": True,
+                "messages": [{"role": "user", "content": "hi"}]}) as response:
+            assert response.status_code == 200
+            raw = "".join(response.iter_text())
+
+    assert "internal gateway error" not in raw
+    assert raw.rstrip().endswith("data: [DONE]"), raw
+    payloads = [json.loads(line[5:]) for line in raw.split("\n")
+                if line.startswith("data:") and "[DONE]" not in line]
+    assert [p["object"] for p in payloads] == ["chat.completion.chunk"] * len(payloads)
+    assert "".join(p["choices"][0]["delta"].get("content") or "" for p in payloads) == "HELLO"
+    # trailer frame: finish_reason must reach the client, or its SDK reads a stall
+    assert payloads[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_one_renderer_feeds_both_the_socket_and_the_trace():
+    """`render=` exists so the trace stores the bytes that were sent, not a re-render.
+
+    That only holds if both sides call the same function -- which is why openai_frame()
+    is one function instead of a branch inside sse_frames(). The error frame is the
+    case that used to disagree: the socket got error_frame() + [DONE] while the trace
+    recorded the raw json.
+    """
+    from engrix_router.core.formats import openai as openai_fmt
+
+    ok = [{"choices": [{"index": 0, "delta": {"content": "hi"}}]}]
+    sent = "".join([chunk async for chunk in runner.sse_frames(_frames(*ok))])
+    assert sent == "".join(runner.openai_frame(frame) for frame in ok) + openai_fmt.SSE_DONE
+
+    failed = [{"__error__": True, "message": "vendor said no",
+               "code": errors.CLASS_UPSTREAM_UNAVAILABLE, "status": 502,
+               "note": "gave up after 3 accounts"}]
+    sent = "".join([chunk async for chunk in runner.sse_frames(_frames(*failed))])
+    assert sent == "".join(runner.openai_frame(frame) for frame in failed)
+    assert sent.rstrip().endswith("data: [DONE]") and sent.count("[DONE]") == 1
+
+
+def test_stream_that_dies_before_the_first_frame_keeps_its_status(client_key):
+    """No connection at all: the status must be 503, not 200 with an error inside.
+
+    This is the failure commit 88c39b2 set out to fix, and it only works because
+    the peek happens before StreamingResponse exists. Deliberately does NOT ask for
+    the `connection` fixture -- an empty fleet is the case under test.
+    """
+    from fastapi.testclient import TestClient
+
+    from engrix_router.web import server
+
+    with TestClient(server.app) as client:
+        response = client.post("/v1/chat/completions", headers=client_key, json={
+            "model": "anthropic/claude-x", "stream": True,
+            "messages": [{"role": "user", "content": "hi"}]})
+
+    assert response.status_code == 503, response.text
+    body = response.json()
+    assert body["error"]["code"] == errors.CLASS_ALL_LOCKED
+    assert "[DONE]" not in response.text
+
+
