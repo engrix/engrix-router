@@ -50,6 +50,13 @@ def _since_ms(period: str) -> int:
 
 @router.get("/usage/stats", dependencies=[Depends(deps.require_admin)])
 async def usage_stats(period: str = Query(default="today")) -> dict[str, Any]:
+    # Enam query agregat di bawah ini menyapu seluruh tabel requests. Dulu
+    # dijalankan langsung di event loop, jadi satu dashboard refresh bisa
+    # menahan stream chat yang sedang mengalir.
+    return await asyncio.to_thread(_usage_stats, period)
+
+
+def _usage_stats(period: str) -> dict[str, Any]:
     since = _since_ms(period)
     totals = query_one(
         "SELECT COUNT(*) AS requests, SUM(status='ok') AS ok, SUM(status!='ok') AS errors,"

@@ -9,6 +9,8 @@ connection instance CRUD), so the dashboard has to guess which is which. Here:
 """
 from __future__ import annotations
 
+import asyncio
+
 import time
 from typing import Any
 
@@ -33,6 +35,13 @@ _CONNECTION_FIELDS = frozenset({
 
 @router.get("/providers", dependencies=[Depends(deps.require_admin)])
 async def list_providers() -> list[dict[str, Any]]:
+    # Seluruh badan fungsi ini kerja SQLite sinkron. Dijalankan di worker
+    # thread supaya tidak memblokir event loop -- lihat catatan di
+    # /api/state (admin_settings.py) dan pola /api/quota.
+    return await asyncio.to_thread(_list_providers)
+
+
+def _list_providers() -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for definition in registry.definitions():
         rows = connections.list_for_provider(definition.id, include_health=False)
@@ -78,7 +87,7 @@ async def list_providers() -> list[dict[str, Any]]:
 
 @router.get("/connections", dependencies=[Depends(deps.require_admin)])
 async def list_connections(provider: str | None = Query(default=None)) -> list[dict[str, Any]]:
-    return connections.list_for_provider(provider)
+    return await asyncio.to_thread(connections.list_for_provider, provider)
 
 
 @router.post("/connections", dependencies=[Depends(deps.require_admin)], status_code=201)

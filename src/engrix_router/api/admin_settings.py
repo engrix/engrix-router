@@ -9,6 +9,7 @@ endpoint cannot be used to reset keys computed as derived state.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -58,7 +59,17 @@ async def patch_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/state", dependencies=[Depends(deps.require_admin)])
 async def process_state() -> dict[str, Any]:
-    """Introspection: providers, nodes, caches, HTTP pools, health, drift."""
+    """Introspection: providers, nodes, caches, HTTP pools, health, drift.
+
+    The whole body is synchronous database work, so it runs in a worker thread:
+    synchronous SQLite calls on the event loop block every other coroutine in the
+    process, including an SSE chat stream that is mid-answer. Same pattern as
+    /api/quota (admin_observability.py).
+    """
+    return await asyncio.to_thread(_process_state)
+
+
+def _process_state() -> dict[str, Any]:
     return {
         "process": config.summary(),
         "providers": [{"id": d.id, "prefixes": list(d.prefixes), "base_url": d.transport.base_url,
