@@ -22,6 +22,17 @@ from engrix_router.accounts import connections
 from engrix_router.storage import settings
 from engrix_router.core.types import Candidate, ProviderDef
 
+def _cid(candidate: Candidate) -> str:
+    """Connection id without forcing a credential build.
+
+    A real Candidate answers from the id captured at construction, so the lazy
+    credentials stay lazy. Duck-typed stubs (tests use SimpleNamespace) have no
+    such attribute and fall back to the credential they were built with.
+    """
+    direct = getattr(candidate, "connection_id", None)
+    return direct or candidate.credentials.connection_id
+
+
 STRATEGY_FILL_FIRST = "fill-first"
 STRATEGY_ROUND_ROBIN = "round-robin"
 STRATEGY_LEAST_RECENT = "least-recent"
@@ -32,21 +43,21 @@ def order(candidates: list[Candidate], *, strategy: str, sticky_limit: int,
           ts: int | None = None) -> list[Candidate]:
     moment = now_ms() if ts is None else ts
     if strategy == STRATEGY_FILL_FIRST:
-        return sorted(candidates, key=lambda c: (c.priority, c.credentials.connection_id))
+        return sorted(candidates, key=lambda c: (c.priority, _cid(c)))
     if strategy == STRATEGY_LEAST_RECENT:
         return sorted(candidates, key=lambda c: (c.last_used_ms if c.last_used_ms else 0,
                                                  c.priority))
     # round-robin: kandidat = yang paling baru dipakai, kecuali sudah lewat sticky limit
     by_recency = sorted(
         candidates,
-        key=lambda c: (-(c.last_used_ms or 0), c.priority, c.credentials.connection_id),
+        key=lambda c: (-(c.last_used_ms or 0), c.priority, _cid(c)),
     )
     current = by_recency[0] if by_recency else None
     if current and current.last_used_ms and current.consecutive_use_count < max(1, sticky_limit):
         return [current, *by_recency[1:]]
     by_age = sorted(
         candidates,
-        key=lambda c: (c.last_used_ms if c.last_used_ms else 0, c.priority, c.credentials.connection_id),
+        key=lambda c: (c.last_used_ms if c.last_used_ms else 0, c.priority, _cid(c)),
     )
     return by_age
 
@@ -63,6 +74,10 @@ def pick(definition: ProviderDef, model: str, *, exclude: set[str] | None = None
 
     This is the ONLY place that decides which candidate gets used; accounts only
     supplies the list + health state (rule: one decision, one owner).
+
+    order() sorts on Candidate.connection_id, NOT credentials.connection_id:
+    credentials are built lazily, and touching them here hydrated EVERY account
+    in the fleet on every pick while only one is ever used.
     """
     plan = select_provider_plan(definition.id)
     candidates, skipped = connections.candidates(definition, model, exclude=exclude, ts=ts)
@@ -102,7 +117,7 @@ def mark_selected(candidate: Candidate) -> None:
     again either (it used to -- every success double-counted, TASK-58 #8).
 
     """
-    connection_id = candidate.credentials.connection_id
+    connection_id = _cid(candidate)
     moment = now_ms()
     with transaction() as db:
         prev = db.execute(

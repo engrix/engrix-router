@@ -268,7 +268,12 @@ async def _dispatch(
                    "code": errors.CLASS_ALL_LOCKED, "status": 503, "upstream_status": None,
                    "vendor_code": None, "retry_after": wait_s}
             return
-        chosen, skipped, plan = selector.pick(definition, model, exclude=excluded)
+        # # _dispatch ini async: memanggil pick() langsung berarti kerja SQLite
+        # # jalan di event loop, jadi satu seleksi 8-30 ms membekukan SEMUA
+        # # respons streaming yang sedang berjalan. Pindahkan ke thread, pola yang
+        # # sama sudah dipakai api/admin_observability.py.
+        chosen, skipped, plan = await asyncio.to_thread(
+            selector.pick, definition, model, exclude=excluded)
         selector.log_plan(plan, chosen, skipped, rid=trace.request_id)
         if chosen is None:
             reason = skipped[0]["reason"] if skipped else "this provider has no connections yet"
@@ -280,7 +285,8 @@ async def _dispatch(
                              f"all candidates under short transient locks -- holding {hold_s}s, one re-pick",
                              rid=trace.request_id)
                 await asyncio.sleep(hold_s)
-                chosen, skipped, plan = selector.pick(definition, model, exclude=excluded)
+                chosen, skipped, plan = await asyncio.to_thread(
+                    selector.pick, definition, model, exclude=excluded)
                 selector.log_plan(plan, chosen, skipped, rid=trace.request_id)
             if chosen is None:
                 opening = selector.next_opening_ms(skipped) if skipped else None
