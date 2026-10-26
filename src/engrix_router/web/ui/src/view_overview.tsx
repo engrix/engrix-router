@@ -6,14 +6,20 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, quotaSnapshot, token } from "./api";
 import { clientBase, fmt, t } from "./i18n";
-import { clock, money, num, short } from "./format";
+import { age, clock, money, num, short } from "./format";
 import { Badge, Card, EmptyState, InlineMsg, QuotaRow, Tile } from "./components";
 import type { DayChart, State, Stats, QuotaSnapshot } from "./types";
+
+// Baris tabel health yang dirender sekaligus. 500 akun = 500 baris DOM yang
+// dibuat ulang setiap refresh; 50 cukup untuk membaca dan sisanya bertahap.
+const HEALTH_PAGE = 50;
 
 export function OverviewView({ refreshKey }: { refreshKey: number }) {
   const [stats, setStats] = useState<Stats | null>(null);
   const [state, setState] = useState<State | null>(null);
   const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
+  const [quotaBusy, setQuotaBusy] = useState(false);
+  const [healthShown, setHealthShown] = useState(HEALTH_PAGE);
   const [chart, setChart] = useState<DayChart[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
@@ -85,7 +91,16 @@ export function OverviewView({ refreshKey }: { refreshKey: number }) {
         </div>
       )}
 
-      <Card title={t("quota.title")} tools={quota && !quota.error ? <button className="tiny" onClick={() => quotaSnapshot(true).then(setQuota)}>{t("conn.refresh_quota")}</button> : null}>
+      {/* Tombol refresh SELALU ada: dulu syaratnya `!quota.error`, jadi
+          tombolnya hilang persis saat kuota gagal -- satu-satunya saat
+          operator butuh mencoba lagi. Sekarang ada, dengan status sibuk. */}
+      <Card title={t("quota.title")} tools={
+        <button className="tiny" disabled={quotaBusy}
+          onClick={async () => {
+            setQuotaBusy(true);
+            try { setQuota(await quotaSnapshot(true)); } finally { setQuotaBusy(false); }
+          }}>{quotaBusy ? t("ui.busy") : t("conn.refresh_quota")}</button>
+      }>
         {quota?.error
           ? <p className="tiny err-text">{quota.error}</p>
           : (quota?.providers || []).filter(p => p.available && (p.readings || []).length).length === 0
@@ -108,7 +123,9 @@ export function OverviewView({ refreshKey }: { refreshKey: number }) {
                 <div className="qhead">
                   <span className="mono">{p.provider}</span>
                   <span className="tiny muted">{p.name || short(p.connection_id)}</span>
-                  <span className="tiny muted">{fmt("quota.fetched", { value: clock(p.fetched_at) })}</span>
+                  <span className="tiny muted" title={clock(p.fetched_at)}>
+                    {fmt("quota.age", { value: age(p.fetched_at) })}
+                  </span>
                 </div>
                 {p.readings.map((r, i) => <QuotaRow key={r.scope + i} reading={r} />)}
               </div>
@@ -143,7 +160,7 @@ export function OverviewView({ refreshKey }: { refreshKey: number }) {
               <th>{t("common.account")}</th><th>{t("common.provider")}</th><th>{t("common.status")}</th><th>{t("common.error")}</th><th>{t("overview.locks")}</th><th>{t("common.last_used")}</th>
             </tr></thead>
             <tbody>
-              {state.health.map(h => (
+              {state.health.slice(0, healthShown).map(h => (
                 <tr key={(h.provider || "?") + ":" + h.connection_id}>
                   <td className="mono tiny"><span title={h.connection_id}>{h.name || short(h.connection_id)}</span></td>
                   <td className="mono tiny">{h.provider || "—"}</td>
@@ -154,6 +171,14 @@ export function OverviewView({ refreshKey }: { refreshKey: number }) {
                 </tr>
               ))}
               {!state.health.length && <EmptyState label={t("common.no_connections")} colSpan={6} />}
+              {state.health.length > healthShown && (
+                <tr><td colSpan={6}>
+                  <button className="tiny" onClick={() => setHealthShown(n => n + HEALTH_PAGE)}>
+                    {fmt("common.load_more", { n: Math.min(HEALTH_PAGE, state.health.length - healthShown) })}
+                  </button>
+                  <span className="tiny muted"> {fmt("common.showing", { shown: healthShown, total: state.health.length })}</span>
+                </td></tr>
+              )}
             </tbody>
           </table>
         </Card>
